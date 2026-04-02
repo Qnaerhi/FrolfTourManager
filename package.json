@@ -1,0 +1,19 @@
+{
+  "name": "frolf-tour-manager",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @frolf-tour/shared && npm run build --workspace @frolf-tour/api && npm run build --workspace @frolf-tour/web",
+    "dev": "concurrently \"npm run dev --workspace @frolf-tour/shared\" \"npm run dev --workspace @frolf-tour/api\" \"npm run dev --workspace @frolf-tour/web\"",
+    "test": "npm run test --workspace @frolf-tour/shared && npm run test --workspace @frolf-tour/api",
+    "typecheck": "npm run typecheck --workspace @frolf-tour/shared && npm run typecheck --workspace @frolf-tour/api && npm run typecheck --workspace @frolf-tour/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2"
+  }
+}
