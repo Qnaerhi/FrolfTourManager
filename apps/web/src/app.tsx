@@ -23,7 +23,8 @@ import {
   type TourInput,
 } from "@frolf-tour/shared";
 import { ApiError, apiRequest } from "./api";
-import { auth } from "./firebase";
+import clusterAlumniMark from "../assets/clusteralumni.jpg";
+import { getWebAuth, isFirebaseClientConfigured } from "./firebase";
 
 type SessionState = {
   token: string | null;
@@ -738,6 +739,7 @@ function AuthSection({
   onSessionChange: (next: SessionState) => void;
   onNotice: (message: string) => void;
 }) {
+  const webAuth = getWebAuth();
   const [registerName, setRegisterName] = useState("");
   const [registerEmail, setRegisterEmail] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
@@ -745,12 +747,47 @@ function AuthSection({
   const [loginPassword, setLoginPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  if (!webAuth) {
+    if (session.user) {
+      return (
+        <SectionCard
+          title="Account"
+          subtitle="Firebase client is not configured in this environment."
+        >
+          <div className="stack">
+            <p className="status error">
+              Sign-in state cannot be refreshed without Firebase web config. Copy{" "}
+              <code>apps/web/.env.example</code> to <code>apps/web/.env</code>, set all <code>VITE_FIREBASE_*</code>{" "}
+              variables, then restart Vite.
+            </p>
+            <button type="button" className="secondary-button" onClick={() => onSessionChange(emptySession)}>
+              Clear saved session
+            </button>
+          </div>
+        </SectionCard>
+      );
+    }
+
+    return (
+      <SectionCard
+        title="Sign In Or Register"
+        subtitle="Accounts use Firebase email and password. Email verification is required for organizers."
+      >
+        <p className="status">
+          Firebase is not configured: copy <code>apps/web/.env.example</code> to <code>apps/web/.env</code>, fill in
+          all <code>VITE_FIREBASE_*</code> values from the Firebase console, then restart the dev server. Public pages
+          (home, tours, competitions) still work without it.
+        </p>
+      </SectionCard>
+    );
+  }
+
   async function handleRegister(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
 
     try {
-      const credential = await createUserWithEmailAndPassword(auth, registerEmail, registerPassword);
+      const credential = await createUserWithEmailAndPassword(webAuth, registerEmail, registerPassword);
       const trimmedName = registerName.trim();
       if (trimmedName) {
         await updateProfile(credential.user, { displayName: trimmedName });
@@ -770,7 +807,7 @@ function AuthSection({
     setError(null);
 
     try {
-      const credential = await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
+      const credential = await signInWithEmailAndPassword(webAuth, loginEmail, loginPassword);
       const token = await getIdToken(credential.user, true);
       const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
       onSessionChange({ token, user: payload.user });
@@ -781,7 +818,7 @@ function AuthSection({
   }
 
   async function handleSendVerificationEmail() {
-    if (!auth.currentUser) {
+    if (!webAuth.currentUser) {
       setError("You must be signed in to send a verification email.");
       return;
     }
@@ -789,7 +826,7 @@ function AuthSection({
     setError(null);
 
     try {
-      await sendEmailVerification(auth.currentUser);
+      await sendEmailVerification(webAuth.currentUser);
       onNotice("Verification email sent.");
     } catch (requestError) {
       setError(extractErrorMessage(requestError));
@@ -797,7 +834,7 @@ function AuthSection({
   }
 
   async function handleRefreshVerification() {
-    if (!auth.currentUser) {
+    if (!webAuth.currentUser) {
       setError("You must be signed in to refresh verification status.");
       return;
     }
@@ -805,8 +842,8 @@ function AuthSection({
     setError(null);
 
     try {
-      await auth.currentUser.reload();
-      const token = await getIdToken(auth.currentUser, true);
+      await webAuth.currentUser.reload();
+      const token = await getIdToken(webAuth.currentUser, true);
       const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
       onSessionChange({ token, user: payload.user });
       onNotice(payload.user.emailVerified ? "Email verified." : "Email is still unverified.");
@@ -819,7 +856,7 @@ function AuthSection({
     setError(null);
 
     try {
-      await signOut(auth);
+      await signOut(webAuth);
       onSessionChange(emptySession);
       onNotice("You have been signed out.");
     } catch (requestError) {
@@ -929,6 +966,13 @@ function TourAdminSection({
   const [selectedTourId, setSelectedTourId] = useState("");
   const [form, setForm] = useState<TourFormState>(emptyTourForm());
   const [error, setError] = useState<string | null>(null);
+  const currentTour = useMemo(() => tours.find((tour) => tour.isCurrent) ?? null, [tours]);
+
+  useEffect(() => {
+    if (!selectedTourId && currentTour) {
+      setSelectedTourId(currentTour.id);
+    }
+  }, [selectedTourId, currentTour]);
 
   useEffect(() => {
     if (!selectedTourId) {
@@ -986,15 +1030,29 @@ function TourAdminSection({
   }
 
   return (
-    <SectionCard title="Tour Admin" subtitle="Create tours and adjust scoring rules.">
+    <SectionCard title="Tour Admin" subtitle="Edit the current tour, create tours, and adjust scoring rules.">
       <form className="stack" onSubmit={handleSubmit}>
+        {currentTour ? (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              setSelectedTourId(currentTour.id);
+              setForm(toTourForm(currentTour));
+            }}
+          >
+            Edit current tour: {currentTour.name}
+          </button>
+        ) : (
+          <p className="status">No current tour is set yet. Create one and enable "Set as current tour".</p>
+        )}
         <label>
           Existing tour
           <select value={selectedTourId} onChange={(event) => setSelectedTourId(event.target.value)}>
             <option value="">Create new tour</option>
             {tours.map((tour) => (
               <option key={tour.id} value={tour.id}>
-                {tour.name} ({tour.seasonLabel})
+                {tour.name} ({tour.seasonLabel}){tour.isCurrent ? " • current" : ""}
               </option>
             ))}
           </select>
@@ -1965,9 +2023,20 @@ export function App() {
   const [heroTitle, setHeroTitle] = useState("Frolf Tour Manager");
 
   useEffect(() => {
+    if (!isFirebaseClientConfigured()) {
+      setSession(emptySession);
+    }
+  }, []);
+
+  useEffect(() => {
+    const webAuth = getWebAuth();
+    if (!webAuth) {
+      return;
+    }
+
     let isActive = true;
 
-    const unsubscribe = onIdTokenChanged(auth, async (firebaseUser) => {
+    const unsubscribe = onIdTokenChanged(webAuth, async (firebaseUser) => {
       if (!isActive) {
         return;
       }
@@ -2038,19 +2107,22 @@ export function App() {
     };
   }, []);
 
-  const roleLabel = useMemo(() => session.user?.roles.join(", ") ?? "Guest", [session.user]);
-
   return (
     <div className="shell">
       <header className="hero">
-        <div>
-          <h1>{heroTitle}</h1>
-          <p>Cluster alumni frolf tour since 2025</p>
-        </div>
-        <div className="stack compact">
-          <div className="list-item">
-            <strong>{session.user?.name ?? "Browsing as guest"}</strong>
-            <small>{session.user ? `${session.user.email} • ${roleLabel}` : "Public browsing enabled"}</small>
+        <img
+          className="hero-bg"
+          src={clusterAlumniMark}
+          alt=""
+          width={1200}
+          height={400}
+          decoding="async"
+        />
+        <div className="hero-scrim" aria-hidden="true" />
+        <div className="hero-content">
+          <div className="hero-text">
+            <h1>{heroTitle}</h1>
+            <p>Cluster alumni frolf tour since 2025</p>
           </div>
         </div>
       </header>
@@ -2062,7 +2134,9 @@ export function App() {
         {session.user?.roles.includes("admin") ? <Link to="/dashboard?tab=tours">Tour Admin</Link> : null}
         <Link to="/dashboard?tab=announcements">Announcements</Link>
         {session.user?.roles.includes("admin") ? <Link to="/dashboard?tab=users">Users</Link> : null}
-        <Link to="/dashboard?tab=account">Account</Link>
+        <Link to="/dashboard?tab=account" className="app-nav-account">
+          {session.user ? session.user.name : "Login / Sign up"}
+        </Link>
       </nav>
 
       {notice ? (
