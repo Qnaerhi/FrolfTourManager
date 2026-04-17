@@ -7,15 +7,15 @@ Frolf Tour Manager is a monorepo MVP for running amateur disc golf tours made up
 - Public home page with announcements, tours, and recent competitions
 - Public tour pages with standings and competition listings
 - Public competition detail pages with participants and final results
-- Email/password auth with development-friendly email verification
+- Firebase Auth-backed authentication (ID tokens) with API-side user profile sync
 - Organizer dashboard for creating and editing competitions
 - Admin tools for tours, announcements, and user management
-- MongoDB-backed API with reusable competitor profiles and duplicate merge support
+- Firestore-backed API with reusable competitor profiles and duplicate merge support
 - Shared TypeScript package for schemas, permissions, and standings logic
 
 ## Workspace Layout
 
-- `apps/api`: Express + TypeScript + Mongoose API
+- `apps/api`: Express + TypeScript + Firebase Admin API
 - `apps/web`: React + TypeScript + Vite frontend
 - `packages/shared`: shared schemas, types, permissions, and standings logic
 - `docs/product-spec.md`: MVP product rules and implementation assumptions
@@ -28,15 +28,14 @@ Frolf Tour Manager is a monorepo MVP for running amateur disc golf tours made up
 npm install
 ```
 
-### 2. Start MongoDB
+### 2. Configure Firebase Admin access
 
-If you have Docker available, you can run the included compose file:
+For local development, authenticate Firebase Admin using either:
 
-```bash
-docker compose up -d
-```
+- Application Default Credentials (`gcloud auth application-default login`), or
+- service account env vars in `apps/api/.env` (`FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`).
 
-If you already run MongoDB locally, use `mongodb://127.0.0.1:27017/frolf-tour-manager` or set a custom `MONGODB_URI`.
+If you want `POST /api/auth/login` and `POST /api/auth/register` to return Firebase ID tokens directly, also set `FIREBASE_WEB_API_KEY`.
 
 ### 3. Configure environment files
 
@@ -60,11 +59,12 @@ This starts:
 ## Authentication Notes
 
 - Admin bootstrap is explicit via `BOOTSTRAP_ADMIN_EMAILS`; only verified users on that allowlist are promoted.
-- In development, the API returns the email verification token in auth responses so the frontend dashboard can complete the flow without a real mail provider.
+- Protected API routes now validate Firebase ID tokens from `Authorization: Bearer <idToken>`.
+- Email verification is handled in Firebase Auth; the API syncs verification state from Firebase on auth and `/api/auth/verify-email`.
 
 ## Seed Test Tour Data
 
-To populate local MongoDB with deterministic demo data for a `Test Tour`:
+To populate Firestore with deterministic demo data for a `Test Tour`:
 
 ```bash
 npm run seed:test-tour --workspace @frolf-tour/api
@@ -76,7 +76,7 @@ This seeds:
 - 8 finalized competitions with full participant lists and scored results
 - a `Test Tour` season (`2026 Test`) with a points table
 
-All seeded users share password `password123` for local testing.
+The seed script creates data records only and does not provision Firebase Auth credentials.
 
 ## Quality Checks
 

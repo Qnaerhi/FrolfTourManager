@@ -1,5 +1,3 @@
-import bcrypt from "bcryptjs";
-import mongoose, { Types } from "mongoose";
 import { connectToDatabase } from "./db.js";
 import {
   CompetitionModel,
@@ -7,12 +5,12 @@ import {
   TourModel,
   UserModel,
   type EmbeddedScoringConfig,
+  type ObjectId,
 } from "./models.js";
 
 const TEST_TOUR_NAME = "Test Tour";
 const TEST_TOUR_SEASON = "2026 Test";
 const TEST_USER_PASSWORD = "password123";
-const TEST_USER_PASSWORD_HASH = await bcrypt.hash(TEST_USER_PASSWORD, 10);
 
 type SeedUser = {
   name: string;
@@ -134,7 +132,7 @@ async function seed() {
     throw new Error("Failed to create or load test tour.");
   }
 
-  const seededUserIds: Types.ObjectId[] = [];
+  const seededUserIds: ObjectId[] = [];
   for (const [index, user] of seedUsers.entries()) {
     const normalizedEmail = user.email.toLowerCase();
     const roles: Array<"user" | "admin"> = index === 0 ? ["user", "admin"] : ["user"];
@@ -145,7 +143,7 @@ async function seed() {
           name: user.name,
           email: user.email,
           normalizedEmail,
-          passwordHash: TEST_USER_PASSWORD_HASH,
+          passwordHash: "",
           roles,
           emailVerified: true,
           verificationToken: null,
@@ -153,10 +151,13 @@ async function seed() {
       },
       { upsert: true, new: true },
     );
+    if (!updated) {
+      throw new Error(`Failed to create user ${normalizedEmail}.`);
+    }
     seededUserIds.push(updated._id);
   }
 
-  const competitorByUserIndex = new Map<number, { id: Types.ObjectId; displayName: string }>();
+  const competitorByUserIndex = new Map<number, { id: ObjectId; displayName: string }>();
   for (const [index, user] of seedUsers.entries()) {
     const normalizedName = user.name.toLowerCase();
     const competitor = await CompetitorProfileModel.findOneAndUpdate(
@@ -172,6 +173,9 @@ async function seed() {
       },
       { upsert: true, new: true },
     );
+    if (!competitor) {
+      throw new Error(`Failed to create competitor ${normalizedName}.`);
+    }
     competitorByUserIndex.set(index, { id: competitor._id, displayName: competitor.displayName });
   }
 
@@ -250,7 +254,4 @@ seed()
   .catch((error) => {
     console.error("Failed to seed test tour data.", error);
     process.exitCode = 1;
-  })
-  .finally(async () => {
-    await mongoose.disconnect();
   });

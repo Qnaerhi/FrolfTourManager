@@ -1,33 +1,36 @@
-import mongoose from "mongoose";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { MongoMemoryServer } from "mongodb-memory-server";
 import request from "supertest";
 import type { Express } from "express";
 
-let mongoServer: MongoMemoryServer;
 let app: Express;
+let clearData: (() => Promise<void>) | undefined;
 
 beforeAll(async () => {
-  mongoServer = await MongoMemoryServer.create();
-  process.env.MONGODB_URI = mongoServer.getUri();
-  process.env.JWT_SECRET = "test-secret";
   process.env.NODE_ENV = "test";
   process.env.ENABLE_RATE_LIMITING = "false";
   process.env.BOOTSTRAP_ADMIN_EMAILS =
     "admin@example.com,admin-signup@example.com,admin-draft@example.com,admin-started@example.com";
 
-  const [{ connectToDatabase }, { createApp }] = await Promise.all([import("./db.js"), import("./app.js")]);
+  const [{ connectToDatabase }, { createApp }, { clearFirestoreCollectionsForTests }] = await Promise.all([
+    import("./db.js"),
+    import("./app.js"),
+    import("./models.js"),
+  ]);
   await connectToDatabase();
+  clearData = clearFirestoreCollectionsForTests;
   app = createApp();
 });
 
 afterEach(async () => {
-  await mongoose.connection.db?.dropDatabase();
+  if (clearData) {
+    await clearData();
+  }
 });
 
 afterAll(async () => {
-  await mongoose.disconnect();
-  await mongoServer.stop();
+  if (clearData) {
+    await clearData();
+  }
 });
 
 async function registerAndVerify(name: string, email: string) {

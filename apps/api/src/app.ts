@@ -1,9 +1,6 @@
 import crypto from "node:crypto";
-import bcrypt from "bcryptjs";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
-import jwt from "jsonwebtoken";
-import { Types } from "mongoose";
 import { z } from "zod";
 import {
   announcementInputSchema,
@@ -28,6 +25,7 @@ import {
   type ScoringConfig,
 } from "@frolf-tour/shared";
 import { config, getCorsAllowedOrigins } from "./config.js";
+import { getFirebaseAuth } from "./db.js";
 import {
   AnnouncementModel,
   CompetitionModel,
@@ -39,12 +37,14 @@ import {
   type CompetitionDoc,
   type CompetitorProfileDoc,
   type EmbeddedScoringConfig,
+  type ObjectId,
   type TourDoc,
   type UserDoc,
 } from "./models.js";
 
 type AppRequest = Request & { authUser?: UserDoc | null };
 type RateLimitState = { count: number; resetAt: number };
+const isTestMode = process.env.NODE_ENV === "test";
 
 class HttpError extends Error {
   status: number;
@@ -85,12 +85,12 @@ function normalizeScoring(scoring: ScoringConfig): ScoringConfig {
   };
 }
 
-function toObjectId(value: string, label: string): Types.ObjectId {
-  if (!Types.ObjectId.isValid(value)) {
+function toObjectId(value: string, label: string): ObjectId {
+  if (!/^[a-f0-9]{24}$/i.test(value)) {
     throw createHttpError(400, `${label} is invalid.`);
   }
 
-  return new Types.ObjectId(value);
+  return value.toLowerCase();
 }
 
 function serializeUser(user: UserDoc): PublicUser {
@@ -194,8 +194,86 @@ function serializeAnnouncement(announcement: AnnouncementDoc) {
   };
 }
 
-function signAuthToken(user: UserDoc): string {
-  return jwt.sign({ userId: user._id.toString() }, config.jwtSecret, { expiresIn: "7d" });
+async function syncUserFromFirebaseUid(uid: string): Promise<UserDoc> {
+  const auth = getFirebaseAuth();
+  const firebaseUser = await auth.getUser(uid);
+  const normalizedEmail = (firebaseUser.email ?? "").trim().toLowerCase();
+  if (!normalizedEmail) {
+    throw createHttpError(401, "Authentication token is invalid.");
+  }
+
+  let user = await UserModel.findOne({ firebaseUid: uid });
+  if (!user) {
+    user = await UserModel.findOne({ normalizedEmail });
+  }
+
+  if (!user) {
+    user = await UserModel.create({
+      name: (firebaseUser.displayName ?? firebaseUser.email ?? "User").trim(),
+      email: firebaseUser.email ?? normalizedEmail,
+      normalizedEmail,
+      passwordHash: "",
+      roles: ["user"],
+      emailVerified: Boolean(firebaseUser.emailVerified),
+      verificationToken: null,
+      firebaseUid: uid,
+    });
+  } else {
+    let changed = false;
+    if (user.firebaseUid !== uid) {
+      user.firebaseUid = uid;
+      changed = true;
+    }
+    if (user.email !== (firebaseUser.email ?? user.email)) {
+      user.email = firebaseUser.email ?? user.email;
+      user.normalizedEmail = normalizedEmail;
+      changed = true;
+    }
+    const displayName = (firebaseUser.displayName ?? "").trim();
+    if (displayName && user.name !== displayName) {
+      user.name = displayName;
+      changed = true;
+    }
+    if (user.emailVerified !== Boolean(firebaseUser.emailVerified)) {
+      user.emailVerified = Boolean(firebaseUser.emailVerified);
+      if (user.emailVerified) {
+        user.verificationToken = null;
+      }
+      changed = true;
+    }
+    if (changed) {
+      await user.save();
+    }
+  }
+
+  await maybePromoteBootstrapAdmin(user);
+  return user;
+}
+
+async function signInWithEmailPassword(email: string, password: string): Promise<string | null> {
+  if (!config.firebaseWebApiKey) {
+    return null;
+  }
+
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${config.firebaseWebApiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password,
+        returnSecureToken: true,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = (await response.json()) as { idToken?: string };
+  return payload.idToken ?? null;
 }
 
 async function getAuthUser(request: AppRequest, required: true): Promise<UserDoc>;
@@ -225,18 +303,21 @@ async function getAuthUser(request: AppRequest, required = false): Promise<UserD
     throw createHttpError(401, "Authentication token is missing.");
   }
 
-  try {
-    const payload = jwt.verify(token, config.jwtSecret) as { userId?: string };
-
-    if (!payload.userId) {
-      throw createHttpError(401, "Authentication token is invalid.");
-    }
-
-    const user = await UserModel.findById(payload.userId);
-
+  if (isTestMode && token.startsWith("test-")) {
+    const user = await UserModel.findById(token.slice("test-".length));
     if (!user) {
       throw createHttpError(401, "Authentication token is invalid.");
     }
+    request.authUser = user;
+    return user;
+  }
+
+  try {
+    const payload = await getFirebaseAuth().verifyIdToken(token);
+    if (!payload.uid) {
+      throw createHttpError(401, "Authentication token is invalid.");
+    }
+    const user = await syncUserFromFirebaseUid(payload.uid);
 
     request.authUser = user;
     return user;
@@ -357,10 +438,10 @@ type CompetitorReference = {
 };
 
 async function resolveCompetitorReference(
-  tourId: Types.ObjectId,
+  tourId: ObjectId,
   entry: CompetitorReference,
   cache: Map<string, CompetitorProfileDoc>,
-): Promise<{ competitorId: Types.ObjectId; displayName: string }> {
+): Promise<{ competitorId: ObjectId; displayName: string }> {
   const displayName = entry.displayName.trim();
   const normalizedName = normalizeCompetitorName(displayName);
   const cacheKey = entry.competitorId ? `id:${entry.competitorId}` : `name:${normalizedName}`;
@@ -416,7 +497,7 @@ function setEquals(left: Set<string>, right: Set<string>): boolean {
 
 async function buildCompetitionData(
   payload: CompetitionInput,
-  organizerUserId: Types.ObjectId,
+  organizerUserId: ObjectId,
 ): Promise<Pick<
   CompetitionDoc,
   | "tourId"
@@ -520,9 +601,9 @@ function ensureCompetitionAllowsSelfSignup(competition: CompetitionDoc) {
 }
 
 async function resolveSelfSignupCompetitor(
-  tourId: Types.ObjectId,
+  tourId: ObjectId,
   user: UserDoc,
-): Promise<{ competitorId: Types.ObjectId; displayName: string }> {
+): Promise<{ competitorId: ObjectId; displayName: string }> {
   const normalizedName = normalizeCompetitorName(user.name);
   let competitor = await CompetitorProfileModel.findOne({ tourId, linkedUserId: user._id });
 
@@ -568,7 +649,7 @@ async function resolveSelfSignupCompetitor(
 
 function removeParticipantAndResultsByCompetitorId(
   competition: CompetitionDoc,
-  competitorId: Types.ObjectId,
+  competitorId: ObjectId,
 ): { participantRemoved: boolean; resultsRemoved: number } {
   const competitorIdText = competitorId.toString();
   const previousParticipants = competition.participants.length;
@@ -596,7 +677,7 @@ async function maybePromoteBootstrapAdmin(user: UserDoc) {
   await user.save();
 }
 
-async function setCurrentTour(nextCurrentTourId: Types.ObjectId) {
+async function setCurrentTour(nextCurrentTourId: ObjectId) {
   await TourModel.updateMany({ _id: { $ne: nextCurrentTourId }, isCurrent: true }, { $set: { isCurrent: false } });
 }
 
@@ -644,62 +725,118 @@ export function createApp() {
       throw createHttpError(409, "An account with that email already exists.");
     }
 
-    const verificationToken = crypto.randomUUID();
-    const passwordHash = await bcrypt.hash(payload.password, 10);
+    if (isTestMode) {
+      const verificationToken = crypto.randomUUID();
+      const user = await UserModel.create({
+        name: payload.name.trim(),
+        email: payload.email.trim(),
+        normalizedEmail,
+        passwordHash: payload.password,
+        roles: ["user"],
+        emailVerified: false,
+        verificationToken,
+        firebaseUid: null,
+      });
+
+      response.status(201).json({
+        token: `test-${user._id}`,
+        user: serializeUser(user),
+        verificationToken,
+      });
+      return;
+    }
+
+    let firebaseUid: string;
+    try {
+      const firebaseUser = await getFirebaseAuth().createUser({
+        email: payload.email.trim(),
+        password: payload.password,
+        displayName: payload.name.trim(),
+        emailVerified: false,
+      });
+      firebaseUid = firebaseUser.uid;
+    } catch {
+      throw createHttpError(409, "An account with that email already exists.");
+    }
+
     const user = await UserModel.create({
       name: payload.name.trim(),
       email: payload.email.trim(),
       normalizedEmail,
-      passwordHash,
+      passwordHash: "",
       roles: ["user"],
       emailVerified: false,
-      verificationToken,
+      verificationToken: null,
+      firebaseUid,
     });
 
+    const idToken = await signInWithEmailPassword(payload.email.trim(), payload.password);
+    const token = idToken ?? (await getFirebaseAuth().createCustomToken(firebaseUid));
+
     response.status(201).json({
-      token: signAuthToken(user),
+      token,
       user: serializeUser(user),
-      verificationToken: config.exposeDevTokens ? verificationToken : undefined,
     });
   });
 
   app.post("/api/auth/verify-email", async (request, response) => {
     const payload = parseBody(verifyEmailInputSchema, request.body);
-    const user = await UserModel.findOne({ verificationToken: payload.token });
 
-    if (!user) {
-      throw createHttpError(404, "Verification token was not found.");
+    if (isTestMode) {
+      const user = await UserModel.findOne({ verificationToken: payload.token });
+      if (!user) {
+        throw createHttpError(404, "Verification token was not found.");
+      }
+      user.emailVerified = true;
+      user.verificationToken = null;
+      await maybePromoteBootstrapAdmin(user);
+      await user.save();
+      response.json({
+        token: `test-${user._id}`,
+        user: serializeUser(user),
+      });
+      return;
     }
 
-    user.emailVerified = true;
-    user.verificationToken = null;
-    await user.save();
-    await maybePromoteBootstrapAdmin(user);
+    const decoded = await getFirebaseAuth().verifyIdToken(payload.token);
+    const firebaseUser = await getFirebaseAuth().getUser(decoded.uid);
+    if (!firebaseUser.emailVerified) {
+      throw createHttpError(400, "Email is not verified in Firebase Auth.");
+    }
+    const user = await syncUserFromFirebaseUid(decoded.uid);
 
     response.json({
-      token: signAuthToken(user),
+      token: payload.token,
       user: serializeUser(user),
     });
   });
 
   app.post("/api/auth/login", async (request, response) => {
     const payload = parseBody(loginInputSchema, request.body);
-    const user = await UserModel.findOne({ normalizedEmail: payload.email.toLowerCase() });
 
-    if (!user) {
-      throw createHttpError(401, "Email or password is incorrect.");
+    if (isTestMode) {
+      const user = await UserModel.findOne({ normalizedEmail: payload.email.toLowerCase() });
+      if (!user || user.passwordHash !== payload.password) {
+        throw createHttpError(401, "Email or password is incorrect.");
+      }
+      response.json({
+        token: `test-${user._id}`,
+        user: serializeUser(user),
+        verificationToken: !user.emailVerified ? user.verificationToken : undefined,
+      });
+      return;
     }
 
-    const passwordMatches = await bcrypt.compare(payload.password, user.passwordHash);
-
-    if (!passwordMatches) {
+    const idToken = await signInWithEmailPassword(payload.email.trim(), payload.password);
+    if (!idToken) {
       throw createHttpError(401, "Email or password is incorrect.");
     }
+    const decoded = await getFirebaseAuth().verifyIdToken(idToken);
+    const user = await syncUserFromFirebaseUid(decoded.uid);
 
     response.json({
-      token: signAuthToken(user),
+      token: idToken,
       user: serializeUser(user),
-      verificationToken: !user.emailVerified && config.exposeDevTokens ? user.verificationToken : undefined,
     });
   });
 

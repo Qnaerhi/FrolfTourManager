@@ -11,28 +11,8 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
 }
 
 const defaultConfigValues = {
-  mongoUri: "mongodb://127.0.0.1:27017/frolf-tour-manager",
-  jwtSecret: "frolf-tour-manager-dev-secret",
   clientOrigin: "http://localhost:5173",
 };
-
-function resolveJwtSecret(): string {
-  const jwtSecret = process.env.JWT_SECRET?.trim();
-
-  if (jwtSecret) {
-    return jwtSecret;
-  }
-
-  if (process.env.NODE_ENV === "test") {
-    return "frolf-tour-manager-test-secret";
-  }
-
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("JWT_SECRET must be explicitly set in production.");
-  }
-
-  return defaultConfigValues.jwtSecret;
-}
 
 function parseTrustProxy(value: string | undefined): boolean | number | string {
   const raw = value?.trim();
@@ -58,16 +38,18 @@ function parseTrustProxy(value: string | undefined): boolean | number | string {
 
 export const config = {
   port: parsePort(process.env.PORT, 4000),
-  mongoUri: process.env.MONGODB_URI ?? defaultConfigValues.mongoUri,
-  jwtSecret: resolveJwtSecret(),
   clientOrigin: process.env.CLIENT_ORIGIN ?? defaultConfigValues.clientOrigin,
   exposeDevTokens: process.env.NODE_ENV !== "production",
   enableRateLimiting: process.env.ENABLE_RATE_LIMITING !== "false",
-  rateLimitStorage: process.env.RATE_LIMIT_STORAGE === "memory" ? "memory" : "mongo",
+  rateLimitStorage: process.env.RATE_LIMIT_STORAGE === "memory" ? "memory" : "firestore",
   rateLimitWindowMs: parsePositiveInteger(process.env.RATE_LIMIT_WINDOW_MS, 60_000),
   rateLimitAuthMax: parsePositiveInteger(process.env.RATE_LIMIT_AUTH_MAX, 20),
   rateLimitPublicMax: parsePositiveInteger(process.env.RATE_LIMIT_PUBLIC_MAX, 120),
   trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
+  firebaseProjectId: process.env.FIREBASE_PROJECT_ID?.trim() || undefined,
+  firebaseClientEmail: process.env.FIREBASE_CLIENT_EMAIL?.trim() || undefined,
+  firebasePrivateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n").trim() || undefined,
+  firebaseWebApiKey: process.env.FIREBASE_WEB_API_KEY?.trim() || undefined,
   bootstrapAdminEmails: (process.env.BOOTSTRAP_ADMIN_EMAILS ?? "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
@@ -80,14 +62,6 @@ function validateProductionConfig() {
   }
 
   const errors: string[] = [];
-
-  if (config.mongoUri === defaultConfigValues.mongoUri) {
-    errors.push("MONGODB_URI must be explicitly set in production.");
-  }
-
-  if (config.jwtSecret.trim().length < 32) {
-    errors.push("JWT_SECRET must be set to a strong value (at least 32 characters) in production.");
-  }
 
   if (config.clientOrigin === defaultConfigValues.clientOrigin) {
     errors.push("CLIENT_ORIGIN must be explicitly set in production.");

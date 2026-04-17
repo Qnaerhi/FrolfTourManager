@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
+  createUserWithEmailAndPassword,
+  getIdToken,
+  onIdTokenChanged,
+  sendEmailVerification,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+} from "firebase/auth";
+import {
   normalizeCompetitorName,
   type AnnouncementInput,
   type AnnouncementSummary,
@@ -14,11 +23,11 @@ import {
   type TourInput,
 } from "@frolf-tour/shared";
 import { ApiError, apiRequest } from "./api";
+import { auth } from "./firebase";
 
 type SessionState = {
   token: string | null;
   user: PublicUser | null;
-  verificationToken: string | null;
 };
 
 type TourRecord = {
@@ -108,6 +117,10 @@ type AnnouncementFormState = {
 };
 
 const sessionStorageKey = "frolf-tour-manager-session";
+const emptySession: SessionState = {
+  token: null,
+  user: null,
+};
 
 function loadSession(): SessionState {
   const raw = window.localStorage.getItem(sessionStorageKey);
@@ -116,7 +129,6 @@ function loadSession(): SessionState {
     return {
       token: null,
       user: null,
-      verificationToken: null,
     };
   }
 
@@ -126,7 +138,6 @@ function loadSession(): SessionState {
     return {
       token: null,
       user: null,
-      verificationToken: null,
     };
   }
 }
@@ -732,37 +743,23 @@ function AuthSection({
   const [registerPassword, setRegisterPassword] = useState("");
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [verificationTokenInput, setVerificationTokenInput] = useState(session.verificationToken ?? "");
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setVerificationTokenInput(session.verificationToken ?? "");
-  }, [session.verificationToken]);
 
   async function handleRegister(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
 
     try {
-      const payload = await apiRequest<{
-        token: string;
-        user: PublicUser;
-        verificationToken?: string;
-      }>("/api/auth/register", {
-        method: "POST",
-        body: JSON.stringify({
-          name: registerName,
-          email: registerEmail,
-          password: registerPassword,
-        }),
-      });
-
-      onSessionChange({
-        token: payload.token,
-        user: payload.user,
-        verificationToken: payload.verificationToken ?? null,
-      });
-      onNotice("Account created. Verify the email to unlock competition management.");
+      const credential = await createUserWithEmailAndPassword(auth, registerEmail, registerPassword);
+      const trimmedName = registerName.trim();
+      if (trimmedName) {
+        await updateProfile(credential.user, { displayName: trimmedName });
+      }
+      await sendEmailVerification(credential.user);
+      const token = await getIdToken(credential.user, true);
+      const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
+      onSessionChange({ token, user: payload.user });
+      onNotice("Account created. Check your inbox to verify your email.");
     } catch (requestError) {
       setError(extractErrorMessage(requestError));
     }
@@ -773,54 +770,58 @@ function AuthSection({
     setError(null);
 
     try {
-      const payload = await apiRequest<{
-        token: string;
-        user: PublicUser;
-        verificationToken?: string;
-      }>("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({
-          email: loginEmail,
-          password: loginPassword,
-        }),
-      });
-
-      onSessionChange({
-        token: payload.token,
-        user: payload.user,
-        verificationToken: payload.verificationToken ?? null,
-      });
+      const credential = await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
+      const token = await getIdToken(credential.user, true);
+      const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
+      onSessionChange({ token, user: payload.user });
       onNotice("You are now signed in.");
     } catch (requestError) {
       setError(extractErrorMessage(requestError));
     }
   }
 
-  async function handleVerifyEmail() {
-    if (!verificationTokenInput.trim()) {
-      setError("Enter the verification token first.");
+  async function handleSendVerificationEmail() {
+    if (!auth.currentUser) {
+      setError("You must be signed in to send a verification email.");
       return;
     }
 
     setError(null);
 
     try {
-      const payload = await apiRequest<{
-        token: string;
-        user: PublicUser;
-      }>("/api/auth/verify-email", {
-        method: "POST",
-        body: JSON.stringify({
-          token: verificationTokenInput,
-        }),
-      });
+      await sendEmailVerification(auth.currentUser);
+      onNotice("Verification email sent.");
+    } catch (requestError) {
+      setError(extractErrorMessage(requestError));
+    }
+  }
 
-      onSessionChange({
-        token: payload.token,
-        user: payload.user,
-        verificationToken: null,
-      });
-      onNotice("Email verified.");
+  async function handleRefreshVerification() {
+    if (!auth.currentUser) {
+      setError("You must be signed in to refresh verification status.");
+      return;
+    }
+
+    setError(null);
+
+    try {
+      await auth.currentUser.reload();
+      const token = await getIdToken(auth.currentUser, true);
+      const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
+      onSessionChange({ token, user: payload.user });
+      onNotice(payload.user.emailVerified ? "Email verified." : "Email is still unverified.");
+    } catch (requestError) {
+      setError(extractErrorMessage(requestError));
+    }
+  }
+
+  async function handleSignOut() {
+    setError(null);
+
+    try {
+      await signOut(auth);
+      onSessionChange(emptySession);
+      onNotice("You have been signed out.");
     } catch (requestError) {
       setError(extractErrorMessage(requestError));
     }
@@ -843,29 +844,17 @@ function AuthSection({
           </div>
 
           {!session.user.emailVerified ? (
-            <div className="inline-form">
-              <input
-                value={verificationTokenInput}
-                onChange={(event) => setVerificationTokenInput(event.target.value)}
-                placeholder="Verification token"
-              />
-              <button type="button" onClick={handleVerifyEmail}>
-                Verify email
+            <div className="inline-actions">
+              <button type="button" onClick={handleSendVerificationEmail}>
+                Send verification email
+              </button>
+              <button type="button" className="secondary-button" onClick={handleRefreshVerification}>
+                I have verified my email
               </button>
             </div>
           ) : null}
 
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() =>
-              onSessionChange({
-                token: null,
-                user: null,
-                verificationToken: null,
-              })
-            }
-          >
+          <button type="button" className="secondary-button" onClick={handleSignOut}>
             Sign out
           </button>
         </div>
@@ -875,7 +864,7 @@ function AuthSection({
   }
 
   return (
-    <SectionCard title="Sign In Or Register" subtitle="Accounts use email and password. Email verification is required for organizers.">
+    <SectionCard title="Sign In Or Register" subtitle="Accounts use Firebase email and password. Email verification is required for organizers.">
       <div className="grid-two">
         <form className="stack" onSubmit={handleRegister}>
           <h3>Create account</h3>
@@ -1973,6 +1962,41 @@ function DashboardPage({
 export function App() {
   const [session, setSession] = useState<SessionState>(() => loadSession());
   const [notice, setNotice] = useState<string | null>(null);
+  const [heroTitle, setHeroTitle] = useState("Frolf Tour Manager");
+
+  useEffect(() => {
+    let isActive = true;
+
+    const unsubscribe = onIdTokenChanged(auth, async (firebaseUser) => {
+      if (!isActive) {
+        return;
+      }
+
+      if (!firebaseUser) {
+        setSession(emptySession);
+        return;
+      }
+
+      try {
+        const token = await getIdToken(firebaseUser, true);
+        const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
+        if (!isActive) {
+          return;
+        }
+        setSession({ token, user: payload.user });
+      } catch {
+        if (!isActive) {
+          return;
+        }
+        setSession(emptySession);
+      }
+    });
+
+    return () => {
+      isActive = false;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     persistSession(session);
@@ -1992,18 +2016,36 @@ export function App() {
     };
   }, [notice]);
 
+  useEffect(() => {
+    let isActive = true;
+
+    apiRequest<{ tour: TourRecord }>("/api/tours/current")
+      .then((payload) => {
+        if (!isActive) {
+          return;
+        }
+        setHeroTitle(payload.tour.name);
+      })
+      .catch(() => {
+        if (!isActive) {
+          return;
+        }
+        setHeroTitle("Frolf Tour Manager");
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
   const roleLabel = useMemo(() => session.user?.roles.join(", ") ?? "Guest", [session.user]);
 
   return (
     <div className="shell">
       <header className="hero">
         <div>
-          <p className="eyebrow">Disc golf tour manager</p>
-          <h1>Frolf Tour Manager</h1>
-          <p>
-            Run amateur tours, publish independent local competitions, and keep public season standings without
-            tracking full scorecards.
-          </p>
+          <h1>{heroTitle}</h1>
+          <p>Cluster alumni frolf tour since 2025</p>
         </div>
         <div className="stack compact">
           <div className="list-item">

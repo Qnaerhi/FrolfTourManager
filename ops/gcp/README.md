@@ -3,6 +3,9 @@
 This folder contains production-oriented commands and checklists for keeping
 FrolfTourManager secure and low-cost on Google Cloud.
 
+For a simpler MVP deployment path (Cloud Run API + Firebase Hosting web),
+see `ops/gcp/mvp/README.md`.
+
 ## Prerequisites
 
 - `gcloud` CLI authenticated to the correct billing account and project.
