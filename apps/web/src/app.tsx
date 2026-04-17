@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
+  type Auth,
   createUserWithEmailAndPassword,
   getIdToken,
   onIdTokenChanged,
@@ -390,7 +391,7 @@ function HomePage() {
                 <Link to={`/tours/${tour.id}`}>{tour.name}</Link>
                 <span className="badge">{tour.seasonLabel}</span>
               </div>
-              <p>{tour.description}</p>
+              <p className="multiline-text">{tour.description}</p>
               <small>
                 Best {tour.scoring.countedResultsLimit ?? "all"} results count
               </small>
@@ -475,7 +476,7 @@ function TourPage() {
       </SectionCard>
 
       <SectionCard title="Tour Description And Rules" subtitle={`${data.competitorCount} competitor profiles`}>
-        <p>{data.tour.description}</p>
+        <p className="multiline-text">{data.tour.description}</p>
         <div className="stack rules-section">
           <div>
             <strong>Scoring summary</strong>
@@ -503,7 +504,7 @@ function TourPage() {
           </div>
           <div>
             <strong>Rules</strong>
-            {data.tour.rulesText?.trim() ? <p>{data.tour.rulesText}</p> : null}
+            {data.tour.rulesText?.trim() ? <p className="multiline-text">{data.tour.rulesText}</p> : null}
           </div>
         </div>
       </SectionCard>
@@ -782,12 +783,14 @@ function AuthSection({
     );
   }
 
+  const auth: Auth = webAuth;
+
   async function handleRegister(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
 
     try {
-      const credential = await createUserWithEmailAndPassword(webAuth, registerEmail, registerPassword);
+      const credential = await createUserWithEmailAndPassword(auth, registerEmail, registerPassword);
       const trimmedName = registerName.trim();
       if (trimmedName) {
         await updateProfile(credential.user, { displayName: trimmedName });
@@ -807,7 +810,7 @@ function AuthSection({
     setError(null);
 
     try {
-      const credential = await signInWithEmailAndPassword(webAuth, loginEmail, loginPassword);
+      const credential = await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
       const token = await getIdToken(credential.user, true);
       const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
       onSessionChange({ token, user: payload.user });
@@ -818,7 +821,7 @@ function AuthSection({
   }
 
   async function handleSendVerificationEmail() {
-    if (!webAuth.currentUser) {
+    if (!auth.currentUser) {
       setError("You must be signed in to send a verification email.");
       return;
     }
@@ -826,7 +829,7 @@ function AuthSection({
     setError(null);
 
     try {
-      await sendEmailVerification(webAuth.currentUser);
+      await sendEmailVerification(auth.currentUser);
       onNotice("Verification email sent.");
     } catch (requestError) {
       setError(extractErrorMessage(requestError));
@@ -834,7 +837,7 @@ function AuthSection({
   }
 
   async function handleRefreshVerification() {
-    if (!webAuth.currentUser) {
+    if (!auth.currentUser) {
       setError("You must be signed in to refresh verification status.");
       return;
     }
@@ -842,8 +845,8 @@ function AuthSection({
     setError(null);
 
     try {
-      await webAuth.currentUser.reload();
-      const token = await getIdToken(webAuth.currentUser, true);
+      await auth.currentUser.reload();
+      const token = await getIdToken(auth.currentUser, true);
       const payload = await apiRequest<{ user: PublicUser }>("/api/auth/me", {}, token);
       onSessionChange({ token, user: payload.user });
       onNotice(payload.user.emailVerified ? "Email verified." : "Email is still unverified.");
@@ -856,7 +859,7 @@ function AuthSection({
     setError(null);
 
     try {
-      await signOut(webAuth);
+      await signOut(auth);
       onSessionChange(emptySession);
       onNotice("You have been signed out.");
     } catch (requestError) {
@@ -1072,18 +1075,20 @@ function TourAdminSection({
         <label>
           Description
           <textarea
+            className="multiline-textarea"
             value={form.description}
             onChange={(event) => setForm({ ...form, description: event.target.value })}
-            rows={4}
+            rows={8}
             required
           />
         </label>
         <label>
           Rules
           <textarea
+            className="multiline-textarea"
             value={form.rulesText}
             onChange={(event) => setForm({ ...form, rulesText: event.target.value })}
-            rows={5}
+            rows={12}
             placeholder="Optional season-specific rules and notes"
           />
         </label>
@@ -1106,9 +1111,10 @@ function TourAdminSection({
         <label>
           Points table
           <textarea
+            className="multiline-textarea"
             value={form.pointsTableText}
             onChange={(event) => setForm({ ...form, pointsTableText: event.target.value })}
-            rows={7}
+            rows={10}
             required
           />
         </label>

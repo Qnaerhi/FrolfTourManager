@@ -163,6 +163,20 @@ textarea {
   resize: vertical;
 }
 
+/* Preserve intentional line breaks (tour rules, descriptions, points table). */
+.multiline-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+textarea.multiline-textarea {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+  min-height: 7rem;
+}
+
 label {
   display: grid;
   gap: 0.4rem;
