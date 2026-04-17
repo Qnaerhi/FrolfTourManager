@@ -2110,14 +2110,19 @@ export function App() {
   return (
     <div className="shell">
       <header className="hero">
-        <img
-          className="hero-bg"
-          src={clusterAlumniMark}
-          alt=""
-          width={1200}
-          height={400}
-          decoding="async"
-        />
+        <figure className="hero-figure">
+          <img
+            className="hero-bg"
+            src={clusterAlumniMark}
+            alt=""
+            width={1200}
+            height={400}
+            decoding="async"
+          />
+          <figcaption className="visually-hidden">
+            Logo and visual identity © Cluster Alumni Ry. All rights reserved.
+          </figcaption>
+        </figure>
         <div className="hero-scrim" aria-hidden="true" />
         <div className="hero-content">
           <div className="hero-text">
