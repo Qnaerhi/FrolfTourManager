@@ -59,8 +59,24 @@ This starts:
 
 ## Authentication Notes
 
-- The first verified account becomes an admin automatically, which bootstraps the empty system.
+- Admin bootstrap is explicit via `BOOTSTRAP_ADMIN_EMAILS`; only verified users on that allowlist are promoted.
 - In development, the API returns the email verification token in auth responses so the frontend dashboard can complete the flow without a real mail provider.
+
+## Seed Test Tour Data
+
+To populate local MongoDB with deterministic demo data for a `Test Tour`:
+
+```bash
+npm run seed:test-tour --workspace @frolf-tour/api
+```
+
+This seeds:
+
+- 20 verified users (`Test Player 01` ... `Test Player 20`)
+- 8 finalized competitions with full participant lists and scored results
+- a `Test Tour` season (`2026 Test`) with a points table
+
+All seeded users share password `password123` for local testing.
 
 ## Quality Checks
 
@@ -69,6 +85,18 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+## GCP Guardrails
+
+Production deployment guardrails live in `ops/gcp`:
+
+- budget and quota baseline setup
+- capped Cloud Run deployment
+- Cloud Armor WAF and rate limit rules
+- uptime checks and alert policy scaffolding
+- emergency cost kill switch runbook
+
+Start from `ops/gcp/README.md` and execute the scripts in order.
 
 ## Current MVP Rules
 

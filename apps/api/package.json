@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --platform node --clean",
     "dev": "tsx watch src/index.ts",
+    "seed:test-tour": "tsx src/seed-test-tour.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

@@ -12,6 +12,9 @@ beforeAll(async () => {
   process.env.MONGODB_URI = mongoServer.getUri();
   process.env.JWT_SECRET = "test-secret";
   process.env.NODE_ENV = "test";
+  process.env.ENABLE_RATE_LIMITING = "false";
+  process.env.BOOTSTRAP_ADMIN_EMAILS =
+    "admin@example.com,admin-signup@example.com,admin-draft@example.com,admin-started@example.com";
 
   const [{ connectToDatabase }, { createApp }] = await Promise.all([import("./db.js"), import("./app.js")]);
   await connectToDatabase();
@@ -44,7 +47,7 @@ async function registerAndVerify(name: string, email: string) {
 
   return {
     token: verifyResponse.body.token as string,
-    user: verifyResponse.body.user as { id: string; roles: string[]; emailVerified: boolean },
+    user: verifyResponse.body.user as { id: string; name: string; roles: string[]; emailVerified: boolean },
   };
 }
 
@@ -85,12 +88,22 @@ function competitionPayload(tourId: string, organizerName: string) {
   };
 }
 
+function publishedCompetitionPayload(tourId: string, organizerName: string, scheduledAt = "2026-06-01T12:00:00.000Z") {
+  return {
+    ...competitionPayload(tourId, organizerName),
+    status: "published",
+    scheduledAt,
+  };
+}
+
 describe("API authorization", () => {
-  it("promotes the first verified user to admin", async () => {
+  it("promotes only allowlisted verified users to admin", async () => {
     const account = await registerAndVerify("Admin", "admin@example.com");
+    const regularUser = await registerAndVerify("Player", "player@example.com");
 
     expect(account.user.emailVerified).toBe(true);
     expect(account.user.roles).toContain("admin");
+    expect(regularUser.user.roles).toEqual(["user"]);
   });
 
   it("blocks unverified users from creating competitions", async () => {
@@ -148,5 +161,138 @@ describe("API authorization", () => {
 
     expect(ownerUpdateResponse.status).toBe(200);
     expect(ownerUpdateResponse.body.competition.title).toBe("Updated by owner");
+  });
+});
+
+describe("competition self-signup", () => {
+  it("allows logged-in users to sign up and unenroll before start", async () => {
+    const admin = await registerAndVerify("Admin", "admin-signup@example.com");
+    const tour = await createTour(admin.token);
+    const organizer = await registerAndVerify("Organizer", "organizer-signup@example.com");
+    const player = await registerAndVerify("Player", "player-signup@example.com");
+
+    const createCompetitionResponse = await request(app)
+      .post("/api/competitions")
+      .set("Authorization", `Bearer ${organizer.token}`)
+      .send(publishedCompetitionPayload(tour.id, "Organizer"));
+
+    expect(createCompetitionResponse.status).toBe(201);
+    const competitionId = createCompetitionResponse.body.competition.id as string;
+
+    const signupResponse = await request(app)
+      .post(`/api/competitions/${competitionId}/signup`)
+      .set("Authorization", `Bearer ${player.token}`)
+      .send();
+
+    expect(signupResponse.status).toBe(200);
+    expect(
+      signupResponse.body.competition.participants.some((participant: { displayName: string }) =>
+        participant.displayName.includes("Player"),
+      ),
+    ).toBe(true);
+
+    const duplicateSignupResponse = await request(app)
+      .post(`/api/competitions/${competitionId}/signup`)
+      .set("Authorization", `Bearer ${player.token}`)
+      .send();
+
+    expect(duplicateSignupResponse.status).toBe(409);
+
+    const unenrollResponse = await request(app)
+      .delete(`/api/competitions/${competitionId}/signup`)
+      .set("Authorization", `Bearer ${player.token}`)
+      .send();
+
+    expect(unenrollResponse.status).toBe(200);
+    expect(
+      unenrollResponse.body.competition.participants.some((participant: { displayName: string }) =>
+        participant.displayName.includes("Player"),
+      ),
+    ).toBe(false);
+  });
+
+  it("blocks signup when competition is not published", async () => {
+    const admin = await registerAndVerify("Admin", "admin-draft@example.com");
+    const tour = await createTour(admin.token);
+    const organizer = await registerAndVerify("Organizer", "organizer-draft@example.com");
+    const player = await registerAndVerify("Player", "player-draft@example.com");
+
+    const draftCompetitionResponse = await request(app)
+      .post("/api/competitions")
+      .set("Authorization", `Bearer ${organizer.token}`)
+      .send(competitionPayload(tour.id, "Organizer"));
+
+    expect(draftCompetitionResponse.status).toBe(201);
+    const draftCompetitionId = draftCompetitionResponse.body.competition.id as string;
+
+    const draftSignupResponse = await request(app)
+      .post(`/api/competitions/${draftCompetitionId}/signup`)
+      .set("Authorization", `Bearer ${player.token}`)
+      .send();
+
+    expect(draftSignupResponse.status).toBe(400);
+  });
+
+  it("blocks signup and unenroll after competition start time", async () => {
+    const admin = await registerAndVerify("Admin", "admin-started@example.com");
+    const tour = await createTour(admin.token);
+    const organizer = await registerAndVerify("Organizer", "organizer-started@example.com");
+    const player = await registerAndVerify("Player", "player-started@example.com");
+
+    const startedCompetitionResponse = await request(app)
+      .post("/api/competitions")
+      .set("Authorization", `Bearer ${organizer.token}`)
+      .send(
+        publishedCompetitionPayload(
+          tour.id,
+          "Organizer",
+          new Date(Date.now() + 60_000).toISOString(),
+        ),
+      );
+
+    expect(startedCompetitionResponse.status).toBe(201);
+    const startedCompetitionId = startedCompetitionResponse.body.competition.id as string;
+
+    const startedWithPlayerResponse = await request(app)
+      .patch(`/api/competitions/${startedCompetitionId}`)
+      .set("Authorization", `Bearer ${organizer.token}`)
+      .send({
+        ...publishedCompetitionPayload(
+          tour.id,
+          "Organizer",
+          new Date(Date.now() + 60_000).toISOString(),
+        ),
+        participants: [{ displayName: "Alpha" }, { displayName: "Beta" }, { displayName: player.user.name }],
+      });
+
+    expect(startedWithPlayerResponse.status).toBe(200);
+
+    const setBackToStartedResponse = await request(app)
+      .patch(`/api/competitions/${startedCompetitionId}`)
+      .set("Authorization", `Bearer ${organizer.token}`)
+      .send({
+        ...publishedCompetitionPayload(
+          tour.id,
+          "Organizer",
+          new Date(Date.now() - 60_000).toISOString(),
+        ),
+        participants: [{ displayName: "Alpha" }, { displayName: "Beta" }, { displayName: player.user.name }],
+      });
+
+    expect(setBackToStartedResponse.status).toBe(200);
+
+    const signupResponse = await request(app)
+      .post(`/api/competitions/${startedCompetitionId}/signup`)
+      .set("Authorization", `Bearer ${player.token}`)
+      .send();
+
+    expect(signupResponse.status).toBe(400);
+
+    const unenrollResponse = await request(app)
+      .delete(`/api/competitions/${startedCompetitionId}/signup`)
+      .set("Authorization", `Bearer ${player.token}`)
+      .send();
+
+    expect(unenrollResponse.status).toBe(400);
   });
 });

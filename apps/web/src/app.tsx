@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Link, Route, Routes, useParams } from "react-router-dom";
+import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   normalizeCompetitorName,
   type AnnouncementInput,
@@ -26,6 +26,8 @@ type TourRecord = {
   name: string;
   seasonLabel: string;
   description: string;
+  rulesText: string;
+  isCurrent: boolean;
   scoring: ScoringConfig;
   createdAt: string;
   updatedAt: string;
@@ -78,11 +80,22 @@ type CompetitionFormState = {
   results: CompetitionFormResult[];
 };
 
+type CompetitionDraftFormState = {
+  tourId: string;
+  title: string;
+  description: string;
+  location: string;
+  scheduledAt: string;
+  organizerName: string;
+  scoresheetUrl: string;
+};
+
 type TourFormState = {
   name: string;
   seasonLabel: string;
   description: string;
-  resultOrder: ScoringConfig["resultOrder"];
+  rulesText: string;
+  isCurrent: boolean;
   countedResultsLimit: string;
   pointsTableText: string;
 };
@@ -122,7 +135,7 @@ function persistSession(session: SessionState) {
   window.localStorage.setItem(sessionStorageKey, JSON.stringify(session));
 }
 
-function emptyCompetitionForm(userName = ""): CompetitionFormState {
+function emptyCompetitionDraftForm(userName = ""): CompetitionDraftFormState {
   return {
     tourId: "",
     title: "",
@@ -131,9 +144,6 @@ function emptyCompetitionForm(userName = ""): CompetitionFormState {
     scheduledAt: "",
     organizerName: userName,
     scoresheetUrl: "",
-    status: "draft",
-    participants: ["", "", ""],
-    results: [],
   };
 }
 
@@ -142,7 +152,8 @@ function emptyTourForm(): TourFormState {
     name: "",
     seasonLabel: "",
     description: "",
-    resultOrder: "lower-is-better",
+    rulesText: "",
+    isCurrent: false,
     countedResultsLimit: "",
     pointsTableText: "1: 15\n2: 12\n3: 10\n4: 8\n5: 6\n6: 4\n7: 2",
   };
@@ -208,11 +219,40 @@ function formatDateTime(value: string) {
   return new Date(value).toLocaleString();
 }
 
+function toSafeExternalHref(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function formatDateTimeLocalValue(value: string) {
   const date = new Date(value);
   const offset = date.getTimezoneOffset();
   const localDate = new Date(date.getTime() - offset * 60_000);
   return localDate.toISOString().slice(0, 16);
+}
+
+function localDatePart(value: string): string {
+  if (!value) return "";
+  return value.split("T")[0] ?? "";
+}
+
+function localTimePart(value: string): string {
+  if (!value) return "";
+  const rawTime = value.split("T")[1] ?? "";
+  return rawTime.slice(0, 5);
+}
+
+function mergeLocalDateTime(date: string, time: string): string {
+  if (!date || !time) return "";
+  return `${date}T${time}`;
 }
 
 function toCompetitionForm(competition: CompetitionSummary): CompetitionFormState {
@@ -241,7 +281,8 @@ function toTourForm(tour: TourRecord): TourFormState {
     name: tour.name,
     seasonLabel: tour.seasonLabel,
     description: tour.description,
-    resultOrder: tour.scoring.resultOrder,
+    rulesText: tour.rulesText ?? "",
+    isCurrent: tour.isCurrent ?? false,
     countedResultsLimit: tour.scoring.countedResultsLimit ? String(tour.scoring.countedResultsLimit) : "",
     pointsTableText: pointsTableToText(tour.scoring.pointsTable),
   };
@@ -339,8 +380,7 @@ function HomePage() {
               </div>
               <p>{tour.description}</p>
               <small>
-                Best {tour.scoring.countedResultsLimit ?? "all"} results count •{" "}
-                {tour.scoring.resultOrder === "lower-is-better" ? "Lower result wins ties" : "Higher result wins ties"}
+                Best {tour.scoring.countedResultsLimit ?? "all"} results count
               </small>
             </article>
           ))}
@@ -396,46 +436,64 @@ function TourPage() {
 
   return (
     <div className="page-grid">
-      <SectionCard title={`${data.tour.name} (${data.tour.seasonLabel})`} subtitle={data.tour.description}>
-        <p>
-          {data.competitorCount} competitor profiles • Best {data.tour.scoring.countedResultsLimit ?? "all"} results
-          count
-        </p>
-        <p>
-          Points table:{" "}
-          {data.tour.scoring.pointsTable.map((entry) => `${entry.place} -> ${entry.points}`).join(", ")}
-        </p>
-      </SectionCard>
-
-      <SectionCard title="Standings" subtitle="Only finalized competitions are counted.">
+      <SectionCard title={`${data.tour.name} (${data.tour.seasonLabel})`} subtitle="Current standings">
         {data.standings.length ? (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Rank</th>
-                  <th>Competitor</th>
-                  <th>Points</th>
-                  <th>Aggregate Result</th>
-                  <th>Counted Events</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.standings.map((entry) => (
-                  <tr key={entry.competitorId}>
-                    <td>{entry.rank}</td>
-                    <td>{entry.displayName}</td>
-                    <td>{entry.totalPoints}</td>
-                    <td>{entry.aggregateResultValue}</td>
-                    <td>{entry.countedResults.length}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ol className="standings-list">
+            {data.standings.map((entry) => (
+              <li key={entry.competitorId} className="standings-item">
+                <div className="standings-rank-wrap">
+                  {entry.rank <= 3 ? (
+                    <span className={`medal medal-${entry.rank}`} aria-label={`Rank ${entry.rank} medal`}>
+                      {entry.rank}
+                    </span>
+                  ) : (
+                    <span className="standings-rank">{entry.rank}</span>
+                  )}
+                  <strong>{entry.displayName}</strong>
+                </div>
+                <small>
+                  {entry.totalPoints} pts • {entry.aggregateResultValue} aggregate • {entry.countedResults.length} events
+                </small>
+              </li>
+            ))}
+          </ol>
         ) : (
           <p>No finalized competitions yet.</p>
         )}
+      </SectionCard>
+
+      <SectionCard title="Tour Description And Rules" subtitle={`${data.competitorCount} competitor profiles`}>
+        <p>{data.tour.description}</p>
+        <div className="stack rules-section">
+          <div>
+            <strong>Scoring summary</strong>
+            <p>
+              Best {data.tour.scoring.countedResultsLimit ?? "all"} results count
+            </p>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Place</th>
+                    <th>Points</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.tour.scoring.pointsTable.map((entry) => (
+                    <tr key={entry.place}>
+                      <td>{entry.place}</td>
+                      <td>{entry.points}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <strong>Rules</strong>
+            {data.tour.rulesText?.trim() ? <p>{data.tour.rulesText}</p> : null}
+          </div>
+        </div>
       </SectionCard>
 
       <SectionCard title="Competitions" subtitle="Public competitions for this tour.">
@@ -476,10 +534,31 @@ function TourPage() {
   );
 }
 
+function CurrentTourRedirectPage() {
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiRequest<{ tour: TourRecord }>("/api/tours/current")
+      .then((payload) => {
+        navigate(`/tours/${payload.tour.id}`, { replace: true });
+      })
+      .catch((requestError) => setError(extractErrorMessage(requestError)));
+  }, [navigate]);
+
+  if (error) {
+    return <p className="status error">{error}</p>;
+  }
+
+  return <p className="status">Loading current tour...</p>;
+}
+
 function CompetitionPage() {
   const { competitionId } = useParams();
+  const [session] = useState<SessionState>(() => loadSession());
   const [competition, setCompetition] = useState<CompetitionSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [signupBusy, setSignupBusy] = useState(false);
 
   useEffect(() => {
     if (!competitionId) {
@@ -499,6 +578,60 @@ function CompetitionPage() {
     return <p className="status">Loading competition...</p>;
   }
 
+  const hasStarted = new Date(competition.scheduledAt).getTime() <= Date.now();
+  const canSelfSignup = competition.status === "published" && !hasStarted;
+  const safeScoresheetUrl = toSafeExternalHref(competition.scoresheetUrl);
+  const isSignedUp =
+    !!session.user &&
+    competition.participants.some(
+      (participant) =>
+        normalizeCompetitorName(participant.displayName) === normalizeCompetitorName(session.user?.name ?? ""),
+    );
+
+  async function handleSelfSignup() {
+    if (!session.token || !competitionId) {
+      return;
+    }
+
+    setSignupBusy(true);
+    setError(null);
+
+    try {
+      const payload = await apiRequest<{ competition: CompetitionSummary }>(
+        `/api/competitions/${competitionId}/signup`,
+        { method: "POST" },
+        session.token,
+      );
+      setCompetition(payload.competition);
+    } catch (requestError) {
+      setError(extractErrorMessage(requestError));
+    } finally {
+      setSignupBusy(false);
+    }
+  }
+
+  async function handleSelfUnenroll() {
+    if (!session.token || !competitionId) {
+      return;
+    }
+
+    setSignupBusy(true);
+    setError(null);
+
+    try {
+      const payload = await apiRequest<{ competition: CompetitionSummary }>(
+        `/api/competitions/${competitionId}/signup`,
+        { method: "DELETE" },
+        session.token,
+      );
+      setCompetition(payload.competition);
+    } catch (requestError) {
+      setError(extractErrorMessage(requestError));
+    } finally {
+      setSignupBusy(false);
+    }
+  }
+
   return (
     <div className="page-grid">
       <SectionCard title={competition.title} subtitle={competition.description}>
@@ -507,10 +640,33 @@ function CompetitionPage() {
         </p>
         <p>Organized by {competition.organizerName}</p>
         <p>Status: {competition.status}</p>
-        {competition.scoresheetUrl ? (
+        {competition.status === "published" ? (
+          canSelfSignup ? (
+            session.token ? (
+              <div className="inline-actions">
+                {!isSignedUp ? (
+                  <button type="button" onClick={handleSelfSignup} disabled={signupBusy}>
+                    {signupBusy ? "Signing up..." : "Sign up as player"}
+                  </button>
+                ) : (
+                  <button type="button" className="secondary-button" onClick={handleSelfUnenroll} disabled={signupBusy}>
+                    {signupBusy ? "Removing..." : "Remove me from competition"}
+                  </button>
+                )}
+              </div>
+            ) : (
+              <p>
+                <Link to="/dashboard?tab=account">Sign in</Link> to sign up for this competition.
+              </p>
+            )
+          ) : (
+            <small>Self-signup is closed because this competition has started.</small>
+          )
+        ) : null}
+        {safeScoresheetUrl ? (
           <p>
             Scoresheet:{" "}
-            <a href={competition.scoresheetUrl} target="_blank" rel="noreferrer">
+            <a href={safeScoresheetUrl} target="_blank" rel="noreferrer">
               Open link
             </a>
           </p>
@@ -809,8 +965,10 @@ function TourAdminSection({
       name: form.name,
       seasonLabel: form.seasonLabel,
       description: form.description,
+      rulesText: form.rulesText,
+      isCurrent: form.isCurrent,
       scoring: {
-        resultOrder: form.resultOrder,
+        resultOrder: "lower-is-better",
         countedResultsLimit: form.countedResultsLimit ? Number(form.countedResultsLimit) : null,
         pointsTable: parsePointsTable(form.pointsTableText),
       },
@@ -873,31 +1031,31 @@ function TourAdminSection({
             required
           />
         </label>
-        <div className="grid-two">
-          <label>
-            Result ordering
-            <select
-              value={form.resultOrder}
-              onChange={(event) =>
-                setForm({
-                  ...form,
-                  resultOrder: event.target.value as ScoringConfig["resultOrder"],
-                })
-              }
-            >
-              <option value="lower-is-better">Lower is better</option>
-              <option value="higher-is-better">Higher is better</option>
-            </select>
-          </label>
-          <label>
-            Best N results count
-            <input
-              value={form.countedResultsLimit}
-              onChange={(event) => setForm({ ...form, countedResultsLimit: event.target.value })}
-              placeholder="Leave empty for all"
-            />
-          </label>
-        </div>
+        <label>
+          Rules
+          <textarea
+            value={form.rulesText}
+            onChange={(event) => setForm({ ...form, rulesText: event.target.value })}
+            rows={5}
+            placeholder="Optional season-specific rules and notes"
+          />
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={form.isCurrent}
+            onChange={(event) => setForm({ ...form, isCurrent: event.target.checked })}
+          />
+          Set as current tour
+        </label>
+        <label>
+          Best N results count
+          <input
+            value={form.countedResultsLimit}
+            onChange={(event) => setForm({ ...form, countedResultsLimit: event.target.value })}
+            placeholder="Leave empty for all"
+          />
+        </label>
         <label>
           Points table
           <textarea
@@ -1134,45 +1292,43 @@ function CompetitionEditorSection({
   token: string;
   onNotice: (message: string) => void;
 }) {
-  const [competitions, setCompetitions] = useState<CompetitionSummary[]>([]);
-  const [competitors, setCompetitors] = useState<CompetitorRecord[]>([]);
-  const [editingCompetitionId, setEditingCompetitionId] = useState("");
-  const [form, setForm] = useState<CompetitionFormState>(emptyCompetitionForm(session.user?.name ?? ""));
+  const [myCompetitions, setMyCompetitions] = useState<CompetitionSummary[]>([]);
+  const [allCompetitions, setAllCompetitions] = useState<CompetitionSummary[]>([]);
+  const [form, setForm] = useState<CompetitionDraftFormState>(emptyCompetitionDraftForm(session.user?.name ?? ""));
   const [error, setError] = useState<string | null>(null);
+  const [competitionView, setCompetitionView] = useState<"all" | "my" | "add">("all");
+  const navigate = useNavigate();
+  const activeTour = tours.find((tour) => tour.isCurrent) ?? null;
 
-  const competitorListId = `competitors-${form.tourId || "none"}`;
+  useEffect(() => {
+    apiRequest<{ competitions: CompetitionSummary[] }>("/api/competitions")
+      .then((payload) => setAllCompetitions(payload.competitions))
+      .catch((requestError) => setError(extractErrorMessage(requestError)));
+  }, []);
 
   useEffect(() => {
     apiRequest<{ competitions: CompetitionSummary[] }>("/api/my/competitions", {}, token)
-      .then((payload) => setCompetitions(payload.competitions))
+      .then((payload) => setMyCompetitions(payload.competitions))
       .catch((requestError) => setError(extractErrorMessage(requestError)));
   }, [token]);
 
   useEffect(() => {
-    if (!editingCompetitionId) {
-      setForm((current) => ({
-        ...emptyCompetitionForm(session.user?.name ?? ""),
-        tourId: current.tourId,
-      }));
-      return;
-    }
-
-    const competition = competitions.find((entry) => entry.id === editingCompetitionId);
-    if (competition) {
-      setForm(toCompetitionForm(competition));
-    }
-  }, [editingCompetitionId, competitions, session.user?.name]);
+    setForm((current) => ({
+      ...current,
+      organizerName: session.user?.name ?? "",
+    }));
+  }, [session.user?.name]);
 
   useEffect(() => {
-    if (!form.tourId) {
-      setCompetitors([]);
+    if (!activeTour) {
       return;
     }
 
-    apiRequest<{ competitors: CompetitorRecord[] }>(`/api/tours/${form.tourId}/competitors`)
-      .then((payload) => setCompetitors(payload.competitors))
-      .catch((requestError) => setError(extractErrorMessage(requestError)));
-  }, [form.tourId]);
+    setForm((current) => ({
+      ...current,
+      tourId: activeTour.id,
+    }));
+  }, [activeTour?.id]);
 
   if (!session.user?.emailVerified) {
     return (
@@ -1182,28 +1338,14 @@ function CompetitionEditorSection({
     );
   }
 
-  function updateParticipants(nextParticipants: string[]) {
-    setForm((current) => ({
-      ...current,
-      participants: nextParticipants,
-      results: syncResults(nextParticipants, current.results),
-    }));
-  }
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
 
-    const participants = form.participants.map((participant) => participant.trim()).filter(Boolean);
-    const results = syncResults(participants, form.results)
-      .filter((result) => result.placement && result.resultValue)
-      .map((result) => ({
-        displayName: result.displayName,
-        placement: Number(result.placement),
-        resultValue: Number(result.resultValue),
-        tieBreakRank: result.tieBreakRank ? Number(result.tieBreakRank) : null,
-        tieBreakNote: result.tieBreakNote.trim() || undefined,
-      }));
+    if (!form.tourId) {
+      setError("No active tour is configured. Set a current tour before creating competitions.");
+      return;
+    }
 
     const payload: CompetitionInput = {
       tourId: form.tourId,
@@ -1213,66 +1355,61 @@ function CompetitionEditorSection({
       scheduledAt: new Date(form.scheduledAt).toISOString(),
       organizerName: form.organizerName,
       scoresheetUrl: form.scoresheetUrl,
-      status: form.status,
-      participants: participants.map((participant) => ({
-        displayName: participant,
-      })),
-      ...(results.length ? { results } : {}),
+      status: "draft",
+      participants: [],
+      results: [],
     };
 
     try {
       const response = await apiRequest<{ competition: CompetitionSummary }>(
-        editingCompetitionId ? `/api/competitions/${editingCompetitionId}` : "/api/competitions",
+        "/api/competitions",
         {
-          method: editingCompetitionId ? "PATCH" : "POST",
+          method: "POST",
           body: JSON.stringify(payload),
         },
         token,
       );
 
-      setCompetitions((current) => {
-        if (editingCompetitionId) {
-          return current.map((competition) =>
-            competition.id === response.competition.id ? response.competition : competition,
-          );
-        }
-
-        return [response.competition, ...current];
-      });
-      setEditingCompetitionId(response.competition.id);
-      setForm(toCompetitionForm(response.competition));
-      onNotice(editingCompetitionId ? "Competition updated." : "Competition created.");
+      setMyCompetitions((current) => [response.competition, ...current]);
+      setForm(emptyCompetitionDraftForm(session.user?.name ?? ""));
+      onNotice("Competition created. Continue in the manage view.");
+      navigate(`/dashboard/competitions/${response.competition.id}/manage`);
     } catch (requestError) {
       setError(extractErrorMessage(requestError));
     }
   }
 
   return (
-    <SectionCard title="Competition Organizer" subtitle="Create draft, published, or finalized competitions.">
-      <div className="grid-two">
+    <section className="card competitions-card">
+      <div className="competition-nav-tools">
+        <div className="competition-list-toggle">
+          <button
+            type="button"
+            className={`secondary-button${competitionView === "all" ? " active-subitem" : ""}`}
+            onClick={() => setCompetitionView("all")}
+          >
+            All competitions
+          </button>
+          <button
+            type="button"
+            className={`secondary-button${competitionView === "my" ? " active-subitem" : ""}`}
+            onClick={() => setCompetitionView("my")}
+          >
+            My competitions
+          </button>
+        </div>
+        <button
+          type="button"
+          className={competitionView === "add" ? "active-subitem" : ""}
+          onClick={() => setCompetitionView("add")}
+        >
+          Add competition
+        </button>
+      </div>
+
+      {competitionView === "add" ? (
         <form className="stack" onSubmit={handleSubmit}>
-          <label>
-            Existing competition
-            <select value={editingCompetitionId} onChange={(event) => setEditingCompetitionId(event.target.value)}>
-              <option value="">Create new competition</option>
-              {competitions.map((competition) => (
-                <option key={competition.id} value={competition.id}>
-                  {competition.title}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Tour
-            <select value={form.tourId} onChange={(event) => setForm({ ...form, tourId: event.target.value })} required>
-              <option value="">Select a tour</option>
-              {tours.map((tour) => (
-                <option key={tour.id} value={tour.id}>
-                  {tour.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          {!activeTour ? <p className="status error">No active tour found. Ask an admin to mark one tour as current.</p> : null}
           <label>
             Title
             <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} required />
@@ -1295,11 +1432,31 @@ function CompetitionEditorSection({
               />
             </label>
             <label>
-              Scheduled at
+              Competition date
               <input
-                type="datetime-local"
-                value={form.scheduledAt}
-                onChange={(event) => setForm({ ...form, scheduledAt: event.target.value })}
+                type="date"
+                value={localDatePart(form.scheduledAt)}
+                onChange={(event) =>
+                  setForm({
+                    ...form,
+                    scheduledAt: mergeLocalDateTime(event.target.value, localTimePart(form.scheduledAt) || "12:00"),
+                  })
+                }
+                required
+              />
+            </label>
+            <label>
+              Competition time
+              <input
+                type="time"
+                value={localTimePart(form.scheduledAt)}
+                onChange={(event) =>
+                  setForm({
+                    ...form,
+                    scheduledAt: mergeLocalDateTime(localDatePart(form.scheduledAt), event.target.value),
+                  })
+                }
+                disabled={!localDatePart(form.scheduledAt)}
                 required
               />
             </label>
@@ -1313,153 +1470,441 @@ function CompetitionEditorSection({
               required
             />
           </label>
-          <div className="grid-two">
-            <label>
-              Scoresheet URL
-              <input
-                value={form.scoresheetUrl}
-                onChange={(event) => setForm({ ...form, scoresheetUrl: event.target.value })}
-                placeholder="https://..."
-              />
-            </label>
-            <label>
-              Status
-              <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as CompetitionStatus })}>
-                <option value="draft">Draft</option>
-                <option value="published">Published</option>
-                <option value="finalized">Finalized</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="stack">
-            <div className="list-item-heading">
-              <strong>Participants</strong>
-              <button type="button" onClick={() => updateParticipants([...form.participants, ""])}>
-                Add participant
-              </button>
-            </div>
-            <datalist id={competitorListId}>
-              {competitors.map((competitor) => (
-                <option key={competitor.id} value={competitor.displayName} />
-              ))}
-            </datalist>
-            {form.participants.map((participant, index) => (
-              <div key={`${index}-${participant}`} className="inline-form">
-                <input
-                  list={competitorListId}
-                  value={participant}
-                  placeholder="Competitor name"
-                  onChange={(event) => {
-                    const nextParticipants = [...form.participants];
-                    nextParticipants[index] = event.target.value;
-                    updateParticipants(nextParticipants);
-                  }}
-                  required
-                />
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => updateParticipants(form.participants.filter((_, itemIndex) => itemIndex !== index))}
-                  disabled={form.participants.length <= 3}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-            <small>Exact existing names will automatically match the tour competitor profile.</small>
-          </div>
-
-          <div className="stack">
-            <div className="list-item-heading">
-              <strong>Results</strong>
-              <small>Required when finalizing.</small>
-            </div>
-            {syncResults(form.participants, form.results).map((result, index) => (
-              <div key={result.displayName || index} className="result-row">
-                <strong>{result.displayName || `Participant ${index + 1}`}</strong>
-                <div className="grid-four">
-                  <label>
-                    Place
-                    <input
-                      value={result.placement}
-                      onChange={(event) => {
-                        const nextResults = syncResults(form.participants, form.results);
-                        const currentResult = nextResults[index] ?? result;
-                        nextResults[index] = { ...currentResult, placement: event.target.value };
-                        setForm({ ...form, results: nextResults });
-                      }}
-                    />
-                  </label>
-                  <label>
-                    Result
-                    <input
-                      value={result.resultValue}
-                      onChange={(event) => {
-                        const nextResults = syncResults(form.participants, form.results);
-                        const currentResult = nextResults[index] ?? result;
-                        nextResults[index] = { ...currentResult, resultValue: event.target.value };
-                        setForm({ ...form, results: nextResults });
-                      }}
-                    />
-                  </label>
-                  <label>
-                    Tie-break rank
-                    <input
-                      value={result.tieBreakRank}
-                      onChange={(event) => {
-                        const nextResults = syncResults(form.participants, form.results);
-                        const currentResult = nextResults[index] ?? result;
-                        nextResults[index] = { ...currentResult, tieBreakRank: event.target.value };
-                        setForm({ ...form, results: nextResults });
-                      }}
-                    />
-                  </label>
-                  <label>
-                    Note
-                    <input
-                      value={result.tieBreakNote}
-                      onChange={(event) => {
-                        const nextResults = syncResults(form.participants, form.results);
-                        const currentResult = nextResults[index] ?? result;
-                        nextResults[index] = { ...currentResult, tieBreakNote: event.target.value };
-                        setForm({ ...form, results: nextResults });
-                      }}
-                    />
-                  </label>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <button type="submit">{editingCompetitionId ? "Update competition" : "Create competition"}</button>
+          <label>
+            Scoresheet URL
+            <input
+              value={form.scoresheetUrl}
+              onChange={(event) => setForm({ ...form, scoresheetUrl: event.target.value })}
+              placeholder="https://..."
+            />
+          </label>
+          <small>Participants and results are managed after creation.</small>
+          <button type="submit" disabled={!activeTour}>
+            Create competition
+          </button>
         </form>
-
-        <div className="stack">
-          <h3>Your competitions</h3>
-          {competitions.length ? (
-            competitions.map((competition) => (
-              <article key={competition.id} className="list-item">
+      ) : (
+        <div className="stack competition-list-panel">
+          <h3>{competitionView === "all" ? "All competitions" : "My competitions"}</h3>
+          {(competitionView === "all" ? allCompetitions : myCompetitions).length ? (
+            (competitionView === "all" ? allCompetitions : myCompetitions).map((competition) => (
+              <article key={competition.id} className="list-item competition-list-item">
                 <div className="list-item-heading">
-                  <strong>{competition.title}</strong>
-                  <span className={`badge badge-${competition.status}`}>{competition.status}</span>
+                  <div className="inline-actions competition-item-main">
+                    <strong>{competition.title}</strong>
+                    <span className={`badge badge-${competition.status}`}>{competition.status}</span>
+                  </div>
+                  {competitionView === "my" ? (
+                    <button type="button" className="secondary-button" onClick={() => navigate(`/dashboard/competitions/${competition.id}/manage`)}>
+                      Manage
+                    </button>
+                  ) : (
+                    <button type="button" className="secondary-button" onClick={() => navigate(`/competitions/${competition.id}`)}>
+                      Open
+                    </button>
+                  )}
                 </div>
-                <p>{competition.location}</p>
-                <small>{formatDateTime(competition.scheduledAt)}</small>
-                <button type="button" onClick={() => setEditingCompetitionId(competition.id)}>
-                  Edit
-                </button>
+                <small>
+                  {competition.location} • {formatDateTime(competition.scheduledAt)}
+                </small>
               </article>
             ))
           ) : (
-            <p>No competitions created yet.</p>
+            <p>{competitionView === "all" ? "No public competitions yet." : "No competitions created yet."}</p>
           )}
         </div>
+      )}
+      {error ? <p className="status error">{error}</p> : null}
+    </section>
+  );
+}
+function CompetitionManagePage({
+  session,
+  onNotice,
+}: {
+  session: SessionState;
+  onNotice: (message: string) => void;
+}) {
+  const { competitionId } = useParams();
+  const navigate = useNavigate();
+  const [form, setForm] = useState<CompetitionFormState | null>(null);
+  const [users, setUsers] = useState<PublicUser[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [participantInput, setParticipantInput] = useState("");
+  const participantSuggestionListId = "participant-user-suggestions";
+
+  useEffect(() => {
+    if (!session.token || !competitionId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    apiRequest<{ competition: CompetitionSummary }>(`/api/competitions/${competitionId}`, {}, session.token)
+      .then((payload) => {
+        setForm(toCompetitionForm(payload.competition));
+      })
+      .catch((requestError) => setError(extractErrorMessage(requestError)))
+      .finally(() => setLoading(false));
+  }, [competitionId, session.token]);
+
+  useEffect(() => {
+    if (!session.token) {
+      setUsers([]);
+      return;
+    }
+
+    apiRequest<UsersPayload>("/api/users", {}, session.token)
+      .then((payload) => setUsers(payload.users))
+      .catch(() => setUsers([]));
+  }, [session.token]);
+
+  if (!session.token || !session.user) {
+    return (
+      <SectionCard title="Manage Competition" subtitle="Sign in to manage a competition.">
+        <p>You need to sign in before you can manage competitions.</p>
+        <button type="button" onClick={() => navigate("/dashboard")}>
+          Go to dashboard
+        </button>
+      </SectionCard>
+    );
+  }
+
+  if (!session.user.emailVerified) {
+    return (
+      <SectionCard title="Manage Competition" subtitle="Verify your email to manage competition details.">
+        <p>Competition tools unlock after email verification.</p>
+        <button type="button" onClick={() => navigate("/dashboard")}>
+          Go to dashboard
+        </button>
+      </SectionCard>
+    );
+  }
+
+  if (loading || !form) {
+    return <p className="status">Loading competition...</p>;
+  }
+
+  const participants = form.participants.map((participant) => participant.trim()).filter(Boolean);
+  const normalizedResults = syncResults(participants, form.results);
+  const hasCompleteResults =
+    normalizedResults.length === participants.length &&
+    normalizedResults.every((result) => result.placement.trim() && result.resultValue.trim());
+
+  const allowedStatuses: CompetitionStatus[] = [
+    "draft",
+    ...(participants.length >= 3 ? (["published"] as CompetitionStatus[]) : []),
+    ...(participants.length >= 3 && hasCompleteResults ? (["finalized"] as CompetitionStatus[]) : []),
+  ];
+  const effectiveStatus: CompetitionStatus =
+    allowedStatuses.includes(form.status) ? form.status : (allowedStatuses[0] ?? "draft");
+
+  function updateParticipants(nextParticipants: string[]) {
+    setForm((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        participants: nextParticipants,
+        results: syncResults(nextParticipants, current.results),
+      };
+    });
+  }
+
+  function addParticipant() {
+    if (!form) {
+      return;
+    }
+
+    const nextParticipant = participantInput.trim();
+    if (!nextParticipant) {
+      return;
+    }
+
+    const alreadyAdded = form.participants.some(
+      (participant) => normalizeCompetitorName(participant) === normalizeCompetitorName(nextParticipant),
+    );
+    if (alreadyAdded) {
+      setError("Participant already added.");
+      return;
+    }
+
+    setError(null);
+    updateParticipants([...form.participants, nextParticipant]);
+    setParticipantInput("");
+  }
+
+  function updateFormResult(index: number, update: Partial<CompetitionFormResult>) {
+    setForm((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextResults = syncResults(current.participants, current.results);
+      const currentResult = nextResults[index];
+      if (!currentResult) {
+        return current;
+      }
+
+      nextResults[index] = { ...currentResult, ...update };
+      return { ...current, results: nextResults };
+    });
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!competitionId || !form) {
+      return;
+    }
+
+    setError(null);
+
+    if (!form.scheduledAt) {
+      setError("Select competition date and time.");
+      return;
+    }
+
+    if (effectiveStatus === "published" && participants.length < 3) {
+      setError("A published competition must have at least three participants.");
+      return;
+    }
+
+    if (effectiveStatus === "finalized" && !hasCompleteResults) {
+      setError("Finalized competitions require complete results for every participant.");
+      return;
+    }
+
+    const results = normalizedResults
+      .filter((result) => result.placement && result.resultValue)
+      .map((result) => ({
+        displayName: result.displayName,
+        placement: Number(result.placement),
+        resultValue: Number(result.resultValue),
+        tieBreakRank: result.tieBreakRank ? Number(result.tieBreakRank) : null,
+        tieBreakNote: result.tieBreakNote.trim() || undefined,
+      }));
+
+    const payload: CompetitionInput = {
+      tourId: form.tourId,
+      title: form.title,
+      description: form.description,
+      location: form.location,
+      scheduledAt: new Date(form.scheduledAt).toISOString(),
+      organizerName: form.organizerName,
+      scoresheetUrl: form.scoresheetUrl,
+      status: effectiveStatus,
+      participants: participants.map((participant) => ({
+        displayName: participant,
+      })),
+      ...(results.length ? { results } : {}),
+    };
+
+    try {
+      const response = await apiRequest<{ competition: CompetitionSummary }>(
+        `/api/competitions/${competitionId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        },
+        session.token,
+      );
+      setForm(toCompetitionForm(response.competition));
+      onNotice("Competition updated.");
+    } catch (requestError) {
+      setError(extractErrorMessage(requestError));
+    }
+  }
+
+  return (
+    <SectionCard
+      title="Manage Competition"
+      subtitle="Add participants and results, then publish or finalize when ready."
+    >
+      <div className="inline-actions manage-header">
+        <button type="button" className="secondary-button" onClick={() => navigate("/dashboard")}>
+          Back to dashboard
+        </button>
       </div>
+
+      <form className="stack manage-form" onSubmit={handleSave}>
+        <div className="grid-two">
+          <label>
+            Competition title
+            <input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} required />
+          </label>
+          <label>
+            Organizer name
+            <input
+              value={form.organizerName}
+              onChange={(event) => setForm({ ...form, organizerName: event.target.value })}
+              required
+            />
+          </label>
+        </div>
+
+        <div className="grid-two">
+          <label>
+            Location
+            <input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} required />
+          </label>
+          <label>
+            Competition date
+            <input
+              type="date"
+              value={localDatePart(form.scheduledAt)}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  scheduledAt: mergeLocalDateTime(event.target.value, localTimePart(form.scheduledAt) || "12:00"),
+                })
+              }
+              required
+            />
+          </label>
+          <label>
+            Competition time
+            <input
+              type="time"
+              value={localTimePart(form.scheduledAt)}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  scheduledAt: mergeLocalDateTime(localDatePart(form.scheduledAt), event.target.value),
+                })
+              }
+              disabled={!localDatePart(form.scheduledAt)}
+              required
+            />
+          </label>
+        </div>
+
+        <label>
+          Description
+          <textarea
+            value={form.description}
+            onChange={(event) => setForm({ ...form, description: event.target.value })}
+            rows={4}
+            required
+          />
+        </label>
+
+        <div className="grid-two">
+          <label>
+            Scoresheet URL
+            <input value={form.scoresheetUrl} onChange={(event) => setForm({ ...form, scoresheetUrl: event.target.value })} />
+          </label>
+          <label>
+            Status
+            {allowedStatuses.length === 1 ? (
+              <span className="status-pill">{effectiveStatus}</span>
+            ) : (
+              <select value={effectiveStatus} onChange={(event) => setForm({ ...form, status: event.target.value as CompetitionStatus })}>
+                {allowedStatuses.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+        </div>
+
+        <div className="stack manage-section">
+          <div className="list-item-heading">
+            <strong>Participants</strong>
+          </div>
+          <datalist id={participantSuggestionListId}>
+            {users.map((user) => (
+              <option key={user.id} value={user.name} />
+            ))}
+          </datalist>
+          <div className="inline-form">
+            <input
+              list={participantSuggestionListId}
+              value={participantInput}
+              onChange={(event) => setParticipantInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  addParticipant();
+                }
+              }}
+            />
+            <button type="button" onClick={addParticipant} disabled={!participantInput.trim()}>
+              Add participant
+            </button>
+          </div>
+          <div className="stack">
+            {form.participants.length ? (
+              form.participants.map((participant, index) => (
+                <div key={index} className="list-item-heading list-item">
+                  <strong>{participant}</strong>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => updateParticipants(form.participants.filter((_, itemIndex) => itemIndex !== index))}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))
+            ) : (
+              <small>No participants added yet.</small>
+            )}
+          </div>
+          <small>Suggestions come from registered users. You can also type custom names.</small>
+        </div>
+
+        <div className="stack manage-section">
+          <div className="list-item-heading">
+            <strong>Results</strong>
+            <small>Required before setting status to finalized.</small>
+          </div>
+          {syncResults(form.participants, form.results).map((result, index) => (
+            <div key={index} className="result-row">
+              <strong>{result.displayName || `Participant ${index + 1}`}</strong>
+              <div className="grid-four">
+                <label>
+                  Place
+                  <input
+                    value={result.placement}
+                    onChange={(event) => updateFormResult(index, { placement: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Result
+                  <input
+                    value={result.resultValue}
+                    onChange={(event) => updateFormResult(index, { resultValue: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Tie-break rank
+                  <input
+                    value={result.tieBreakRank}
+                    onChange={(event) => updateFormResult(index, { tieBreakRank: event.target.value })}
+                  />
+                </label>
+                <label>
+                  Note
+                  <input
+                    value={result.tieBreakNote}
+                    onChange={(event) => updateFormResult(index, { tieBreakNote: event.target.value })}
+                  />
+                </label>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <button type="submit">Save competition</button>
+      </form>
       {error ? <p className="status error">{error}</p> : null}
     </SectionCard>
   );
 }
+
+type DashboardTab = "account" | "competitions" | "tours" | "announcements" | "users";
 
 function DashboardPage({
   session,
@@ -1472,33 +1917,55 @@ function DashboardPage({
 }) {
   const [tours, setTours] = useState<TourRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+
+  const isAdmin = session.user?.roles.includes("admin") ?? false;
+  const isLoggedIn = Boolean(session.token);
+
+  const requestedTab = searchParams.get("tab");
+  const availableTabs: DashboardTab[] = [
+    "account",
+    ...(isLoggedIn ? (["competitions"] as DashboardTab[]) : []),
+    ...(isAdmin ? (["tours", "announcements", "users"] as DashboardTab[]) : []),
+  ];
+  const preferredDefault: DashboardTab = isLoggedIn ? "competitions" : "account";
+  const activeTab =
+    requestedTab && availableTabs.includes(requestedTab as DashboardTab)
+      ? (requestedTab as DashboardTab)
+      : preferredDefault;
 
   useEffect(() => {
+    if (!isLoggedIn) return;
     apiRequest<{ tours: TourRecord[] }>("/api/tours")
       .then((payload) => setTours(payload.tours))
       .catch((requestError) => setError(extractErrorMessage(requestError)));
-  }, []);
-
-  const isAdmin = session.user?.roles.includes("admin") ?? false;
+  }, [isLoggedIn]);
 
   return (
     <div className="page-grid">
       {error ? <p className="status error">{error}</p> : null}
-      <AuthSection session={session} onSessionChange={onSessionChange} onNotice={onNotice} />
-      {session.token ? (
-        <>
-          <CompetitionEditorSection session={session} tours={tours} token={session.token} onNotice={onNotice} />
-          <TourAdminSection
-            token={session.token}
-            isAdmin={isAdmin}
-            tours={tours}
-            onToursChange={setTours}
-            onNotice={onNotice}
-          />
-          <AnnouncementAdminSection token={session.token} isAdmin={isAdmin} tours={tours} onNotice={onNotice} />
-          <UserAdminSection token={session.token} isAdmin={isAdmin} onNotice={onNotice} />
-        </>
-      ) : null}
+
+      {activeTab === "account" && (
+        <AuthSection session={session} onSessionChange={onSessionChange} onNotice={onNotice} />
+      )}
+      {activeTab === "competitions" && isLoggedIn && (
+        <CompetitionEditorSection session={session} tours={tours} token={session.token!} onNotice={onNotice} />
+      )}
+      {activeTab === "tours" && isAdmin && (
+        <TourAdminSection
+          token={session.token!}
+          isAdmin={isAdmin}
+          tours={tours}
+          onToursChange={setTours}
+          onNotice={onNotice}
+        />
+      )}
+      {activeTab === "announcements" && isAdmin && (
+        <AnnouncementAdminSection token={session.token!} isAdmin={isAdmin} tours={tours} onNotice={onNotice} />
+      )}
+      {activeTab === "users" && isAdmin && (
+        <UserAdminSection token={session.token!} isAdmin={isAdmin} onNotice={onNotice} />
+      )}
     </div>
   );
 }
@@ -1510,6 +1977,20 @@ export function App() {
   useEffect(() => {
     persistSession(session);
   }, [session]);
+
+  useEffect(() => {
+    if (!notice) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setNotice(null);
+    }, 4000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [notice]);
 
   const roleLabel = useMemo(() => session.user?.roles.join(", ") ?? "Guest", [session.user]);
 
@@ -1529,19 +2010,31 @@ export function App() {
             <strong>{session.user?.name ?? "Browsing as guest"}</strong>
             <small>{session.user ? `${session.user.email} • ${roleLabel}` : "Public browsing enabled"}</small>
           </div>
-          <nav className="nav-row">
-            <Link to="/">Home</Link>
-            <Link to="/dashboard">Dashboard</Link>
-          </nav>
         </div>
       </header>
 
-      {notice ? <p className="status success">{notice}</p> : null}
+      <nav className="app-nav">
+        <Link to="/">Home</Link>
+        <Link to="/tours">Current Tour</Link>
+        <Link to="/dashboard?tab=competitions">Competitions</Link>
+        {session.user?.roles.includes("admin") ? <Link to="/dashboard?tab=tours">Tour Admin</Link> : null}
+        <Link to="/dashboard?tab=announcements">Announcements</Link>
+        {session.user?.roles.includes("admin") ? <Link to="/dashboard?tab=users">Users</Link> : null}
+        <Link to="/dashboard?tab=account">Account</Link>
+      </nav>
+
+      {notice ? (
+        <div className="snackbar success" role="status" aria-live="polite">
+          {notice}
+        </div>
+      ) : null}
 
       <main>
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/dashboard" element={<DashboardPage session={session} onSessionChange={setSession} onNotice={setNotice} />} />
+          <Route path="/dashboard/competitions/:competitionId/manage" element={<CompetitionManagePage session={session} onNotice={setNotice} />} />
+          <Route path="/tours" element={<CurrentTourRedirectPage />} />
           <Route path="/tours/:tourId" element={<TourPage />} />
           <Route path="/competitions/:competitionId" element={<CompetitionPage />} />
         </Routes>

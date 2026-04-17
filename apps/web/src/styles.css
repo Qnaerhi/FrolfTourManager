@@ -136,6 +136,24 @@ td {
   font-weight: 700;
 }
 
+.app-nav {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.9rem;
+  border: 1px solid #dbe7de;
+  background: white;
+}
+
+.app-nav a {
+  flex: 1 1 120px;
+  text-align: center;
+  font-weight: 700;
+}
+
 .page-grid {
   display: grid;
   gap: 1rem;
@@ -242,6 +260,24 @@ td {
   color: #205b34;
 }
 
+.snackbar {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 1000;
+  max-width: min(460px, calc(100vw - 2rem));
+  padding: 0.85rem 1rem;
+  border-radius: 0.9rem;
+  box-shadow: 0 14px 28px rgba(20, 40, 28, 0.24);
+  border: 1px solid transparent;
+}
+
+.snackbar.success {
+  background: #ddf3e3;
+  border-color: #b8e3c4;
+  color: #205b34;
+}
+
 .inline-form,
 .inline-actions {
   display: flex;
@@ -273,6 +309,177 @@ td {
 
 .table-scroll {
   overflow-x: auto;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  background: white;
+  border: 1px solid #dbe7de;
+  border-radius: 1.2rem;
+  padding: 0.4rem;
+  box-shadow: 0 12px 30px rgba(27, 63, 37, 0.05);
+}
+
+.tab-btn {
+  flex: 1;
+  min-width: max-content;
+  border-radius: 0.8rem;
+  padding: 0.6rem 1.1rem;
+  background: transparent;
+  color: #4e6454;
+  font-weight: 600;
+  font-size: 0.9rem;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab-btn:hover {
+  background: #eef5ef;
+  color: #175c32;
+  opacity: 1;
+}
+
+.tab-btn.active {
+  background: #175c32;
+  color: white;
+}
+
+.tab-btn.active:hover {
+  opacity: 0.92;
+}
+
+.manage-header {
+  margin-bottom: 0.6rem;
+}
+
+.manage-form {
+  gap: 1.2rem;
+}
+
+.manage-section {
+  gap: 1rem;
+}
+
+.standings-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.standings-item {
+  border: 1px solid #e2ebe4;
+  border-radius: 0.8rem;
+  padding: 0.7rem 0.85rem;
+  background: #fbfdfb;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.standings-rank-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.standings-rank {
+  width: 1.4rem;
+  text-align: center;
+  font-weight: 700;
+  color: #415347;
+}
+
+.medal {
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.medal-1 {
+  background: #ffe08b;
+  color: #7f5a00;
+}
+
+.medal-2 {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.medal-3 {
+  background: #f6cba1;
+  color: #8a4c21;
+}
+
+.rules-section {
+  border-top: 1px solid #dde8df;
+  padding-top: 0.7rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 2.65rem;
+  padding: 0 0.9rem;
+  border: 1px solid #c4d7c9;
+  border-radius: 0.8rem;
+  background: #f5faf6;
+  color: #173121;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.competition-nav-tools {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.8rem;
+}
+
+.competition-list-toggle {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.active-subitem {
+  background: #175c32;
+  color: #fff;
+}
+
+.competition-list-panel {
+  align-self: start;
+}
+
+.competition-list-item {
+  padding: 0.7rem 0.85rem;
+}
+
+.competition-item-main {
+  gap: 0.5rem;
+}
+
+.competition-list-item .list-item-heading {
+  align-items: flex-start;
+}
+
+.competition-list-item .secondary-button {
+  margin-left: auto;
+  padding: 0.45rem 0.75rem;
+}
+
+@media (max-width: 980px) {
+  .competition-editor-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {

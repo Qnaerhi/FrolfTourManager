@@ -1,0 +1,24 @@
+{
+  "displayName": "frolf-api-high-5xx-rate",
+  "documentation": {
+    "content": "Cloud Run API is returning elevated 5xx responses.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "5xx error ratio above 5%",
+      "conditionMonitoringQueryLanguage": {
+        "duration": "300s",
+        "query": "fetch cloud_run_revision\n| {\n    total: metric 'run.googleapis.com/request_count'\n      | align rate(1m)\n      | every 1m;\n    errors: metric 'run.googleapis.com/request_count'\n      | filter metric.response_code_class == '5xx'\n      | align rate(1m)\n      | every 1m\n  }\n| ratio\n| condition val() > 0.05"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "enabled": true,
+  "notificationChannels": [
+    "projects/PROJECT_ID/notificationChannels/CHANNEL_ID"
+  ]
+}

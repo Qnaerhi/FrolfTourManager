@@ -3,7 +3,7 @@ import mongoose, { Schema, type HydratedDocument, type Model, type Types } from 
 export type EmbeddedScoringConfig = {
   pointsTable: Array<{ place: number; points: number }>;
   countedResultsLimit: number | null;
-  resultOrder: "lower-is-better" | "higher-is-better";
+  resultOrder: "lower-is-better";
 };
 
 export type AuditEntryRecord = {
@@ -44,6 +44,8 @@ export type TourRecord = {
   name: string;
   seasonLabel: string;
   description: string;
+  rulesText: string;
+  isCurrent: boolean;
   scoring: EmbeddedScoringConfig;
   createdAt: Date;
   updatedAt: Date;
@@ -88,6 +90,12 @@ export type CompetitionRecord = {
   updatedAt: Date;
 };
 
+export type RateLimitBucketRecord = {
+  key: string;
+  count: number;
+  expiresAt: Date;
+};
+
 const scoringConfigSchema = new Schema(
   {
     pointsTable: [
@@ -99,8 +107,8 @@ const scoringConfigSchema = new Schema(
     countedResultsLimit: { type: Number, min: 1, default: null },
     resultOrder: {
       type: String,
-      enum: ["lower-is-better", "higher-is-better"],
-      required: true,
+      enum: ["lower-is-better"],
+      default: "lower-is-better",
     },
   },
   { _id: false },
@@ -159,6 +167,8 @@ const tourSchema = new Schema<TourRecord>(
     name: { type: String, required: true, trim: true },
     seasonLabel: { type: String, required: true, trim: true },
     description: { type: String, required: true, trim: true },
+    rulesText: { type: String, default: "" },
+    isCurrent: { type: Boolean, default: false, index: true },
     scoring: { type: scoringConfigSchema, required: true },
   },
   { timestamps: true },
@@ -213,11 +223,20 @@ const competitionSchema = new Schema<CompetitionRecord>(
 
 competitorProfileSchema.index({ tourId: 1, normalizedName: 1 }, { unique: true });
 
+const rateLimitBucketSchema = new Schema<RateLimitBucketRecord>({
+  key: { type: String, required: true, unique: true, index: true },
+  count: { type: Number, required: true, min: 0, default: 0 },
+  expiresAt: { type: Date, required: true },
+});
+
+rateLimitBucketSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
 export type UserDoc = HydratedDocument<UserRecord>;
 export type TourDoc = HydratedDocument<TourRecord>;
 export type CompetitorProfileDoc = HydratedDocument<CompetitorProfileRecord>;
 export type AnnouncementDoc = HydratedDocument<AnnouncementRecord>;
 export type CompetitionDoc = HydratedDocument<CompetitionRecord>;
+export type RateLimitBucketDoc = HydratedDocument<RateLimitBucketRecord>;
 
 export const UserModel: Model<UserRecord> =
   (mongoose.models.User as Model<UserRecord> | undefined) || mongoose.model<UserRecord>("User", userSchema);
@@ -232,3 +251,6 @@ export const AnnouncementModel: Model<AnnouncementRecord> =
 export const CompetitionModel: Model<CompetitionRecord> =
   (mongoose.models.Competition as Model<CompetitionRecord> | undefined) ||
   mongoose.model<CompetitionRecord>("Competition", competitionSchema);
+export const RateLimitBucketModel: Model<RateLimitBucketRecord> =
+  (mongoose.models.RateLimitBucket as Model<RateLimitBucketRecord> | undefined) ||
+  mongoose.model<RateLimitBucketRecord>("RateLimitBucket", rateLimitBucketSchema);

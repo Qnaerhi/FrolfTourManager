@@ -27,11 +27,12 @@ import {
   type PublicUser,
   type ScoringConfig,
 } from "@frolf-tour/shared";
-import { config } from "./config.js";
+import { config, getCorsAllowedOrigins } from "./config.js";
 import {
   AnnouncementModel,
   CompetitionModel,
   CompetitorProfileModel,
+  RateLimitBucketModel,
   TourModel,
   UserModel,
   type AnnouncementDoc,
@@ -43,6 +44,7 @@ import {
 } from "./models.js";
 
 type AppRequest = Request & { authUser?: UserDoc | null };
+type RateLimitState = { count: number; resetAt: number };
 
 class HttpError extends Error {
   status: number;
@@ -78,6 +80,7 @@ function normalizeScoring(scoring: ScoringConfig): ScoringConfig {
 
   return {
     ...parsed,
+    resultOrder: "lower-is-better",
     pointsTable: [...parsed.pointsTable].sort((a, b) => a.place - b.place),
   };
 }
@@ -111,7 +114,7 @@ function serializeScoring(scoring: EmbeddedScoringConfig | null | undefined): Sc
       points: entry.points,
     })),
     countedResultsLimit: scoring.countedResultsLimit,
-    resultOrder: scoring.resultOrder,
+    resultOrder: "lower-is-better",
   };
 }
 
@@ -172,6 +175,8 @@ function serializeTour(tour: TourDoc) {
     name: tour.name,
     seasonLabel: tour.seasonLabel,
     description: tour.description,
+    rulesText: tour.rulesText ?? "",
+    isCurrent: Boolean(tour.isCurrent),
     scoring: serializeScoring(tour.scoring),
     createdAt: tour.createdAt.toISOString(),
     updatedAt: tour.updatedAt.toISOString(),
@@ -258,6 +263,93 @@ function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   }
 
   return result.data;
+}
+
+type RateLimitOptions = {
+  keyPrefix: string;
+  maxRequests: number;
+  windowMs: number;
+  message: string;
+  methods?: string[];
+};
+
+const rateLimitStore = new Map<string, RateLimitState>();
+
+function escapeRegexPattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getRateLimitIdentifier(request: Request): string {
+  return request.ip || request.socket.remoteAddress || "unknown";
+}
+
+async function consumeRateLimit(
+  keyPrefix: string,
+  identifier: string,
+  windowMs: number,
+): Promise<{ count: number; resetAt: number }> {
+  const now = Date.now();
+
+  if (config.rateLimitStorage === "memory") {
+    const key = `${keyPrefix}:${identifier}`;
+    const existing = rateLimitStore.get(key);
+
+    if (!existing || now >= existing.resetAt) {
+      const next = { count: 1, resetAt: now + windowMs };
+      rateLimitStore.set(key, next);
+      return next;
+    }
+
+    existing.count += 1;
+    return existing;
+  }
+
+  const windowStart = Math.floor(now / windowMs) * windowMs;
+  const resetAt = windowStart + windowMs;
+  const bucketKey = `${keyPrefix}:${identifier}:${windowStart}`;
+  const bucket = await RateLimitBucketModel.findOneAndUpdate(
+    { key: bucketKey },
+    {
+      $setOnInsert: {
+        count: 0,
+        expiresAt: new Date(resetAt + windowMs),
+      },
+      $inc: { count: 1 },
+    },
+    { upsert: true, new: true },
+  );
+
+  if (!bucket) {
+    throw createHttpError(500, "Rate limiter storage failure.");
+  }
+
+  return {
+    count: bucket.count,
+    resetAt,
+  };
+}
+
+function createRateLimiter(options: RateLimitOptions) {
+  return async (request: Request, _response: Response, next: NextFunction) => {
+    if (!config.enableRateLimiting) {
+      next();
+      return;
+    }
+
+    if (options.methods && !options.methods.includes(request.method.toUpperCase())) {
+      next();
+      return;
+    }
+
+    const identifier = getRateLimitIdentifier(request);
+    const state = await consumeRateLimit(options.keyPrefix, identifier, options.windowMs);
+
+    if (state.count > options.maxRequests) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((state.resetAt - Date.now()) / 1000));
+      throw createHttpError(429, options.message, { retryAfterSeconds });
+    }
+    next();
+  };
 }
 
 type CompetitorReference = {
@@ -418,10 +510,84 @@ async function buildCompetitionData(
   };
 }
 
+function ensureCompetitionAllowsSelfSignup(competition: CompetitionDoc) {
+  if (competition.status !== "published") {
+    throw createHttpError(400, "Signup is only available for published competitions.");
+  }
+
+  if (competition.scheduledAt.getTime() <= Date.now()) {
+    throw createHttpError(400, "Signup is closed because the competition has started.");
+  }
+}
+
+async function resolveSelfSignupCompetitor(
+  tourId: Types.ObjectId,
+  user: UserDoc,
+): Promise<{ competitorId: Types.ObjectId; displayName: string }> {
+  const normalizedName = normalizeCompetitorName(user.name);
+  let competitor = await CompetitorProfileModel.findOne({ tourId, linkedUserId: user._id });
+
+  if (!competitor) {
+    competitor = await CompetitorProfileModel.findOne({ tourId, normalizedName });
+  }
+
+  if (!competitor) {
+    competitor = await CompetitorProfileModel.create({
+      tourId,
+      displayName: user.name,
+      normalizedName,
+      aliases: [],
+      linkedUserId: user._id,
+    });
+  } else {
+    const linkedUserId = competitor.linkedUserId?.toString();
+    if (linkedUserId && linkedUserId !== user._id.toString()) {
+      throw createHttpError(409, "Unable to sign up with this profile.");
+    }
+
+    let changed = false;
+    if (!competitor.linkedUserId) {
+      competitor.linkedUserId = user._id;
+      changed = true;
+    }
+
+    if (user.name !== competitor.displayName && !competitor.aliases.includes(user.name)) {
+      competitor.aliases = [...competitor.aliases, user.name];
+      changed = true;
+    }
+
+    if (changed) {
+      await competitor.save();
+    }
+  }
+
+  return {
+    competitorId: competitor._id,
+    displayName: competitor.displayName,
+  };
+}
+
+function removeParticipantAndResultsByCompetitorId(
+  competition: CompetitionDoc,
+  competitorId: Types.ObjectId,
+): { participantRemoved: boolean; resultsRemoved: number } {
+  const competitorIdText = competitorId.toString();
+  const previousParticipants = competition.participants.length;
+  const previousResults = competition.results.length;
+
+  competition.participants = competition.participants.filter(
+    (participant) => participant.competitorId.toString() !== competitorIdText,
+  );
+  competition.results = competition.results.filter((result) => result.competitorId.toString() !== competitorIdText);
+
+  return {
+    participantRemoved: competition.participants.length !== previousParticipants,
+    resultsRemoved: previousResults - competition.results.length,
+  };
+}
+
 async function maybePromoteBootstrapAdmin(user: UserDoc) {
-  const adminCount = await UserModel.countDocuments({ roles: "admin" });
-  const shouldBootstrap =
-    adminCount === 0 || config.bootstrapAdminEmails.includes(user.normalizedEmail.toLowerCase());
+  const shouldBootstrap = config.bootstrapAdminEmails.includes(user.normalizedEmail.toLowerCase());
 
   if (!shouldBootstrap || user.roles.includes("admin")) {
     return;
@@ -431,16 +597,40 @@ async function maybePromoteBootstrapAdmin(user: UserDoc) {
   await user.save();
 }
 
+async function setCurrentTour(nextCurrentTourId: Types.ObjectId) {
+  await TourModel.updateMany({ _id: { $ne: nextCurrentTourId }, isCurrent: true }, { $set: { isCurrent: false } });
+}
+
 export function createApp() {
   const app = express();
+  app.set("trust proxy", config.trustProxy);
+  const authRateLimiter = createRateLimiter({
+    keyPrefix: "auth",
+    maxRequests: config.rateLimitAuthMax,
+    windowMs: config.rateLimitWindowMs,
+    message: "Too many authentication attempts. Please try again shortly.",
+    methods: ["POST"],
+  });
+  const publicReadRateLimiter = createRateLimiter({
+    keyPrefix: "public-read",
+    maxRequests: config.rateLimitPublicMax,
+    windowMs: config.rateLimitWindowMs,
+    message: "Too many requests from this IP. Please try again shortly.",
+    methods: ["GET"],
+  });
 
   app.use(
     cors({
-      origin: config.clientOrigin,
+      origin: getCorsAllowedOrigins(),
       credentials: false,
     }),
   );
   app.use(express.json({ limit: "1mb" }));
+  app.use("/api/auth/login", authRateLimiter);
+  app.use("/api/auth/register", authRateLimiter);
+  app.use("/api/home", publicReadRateLimiter);
+  app.use("/api/tours", publicReadRateLimiter);
+  app.use("/api/competitions", publicReadRateLimiter);
 
   app.get("/api/health", (_request, response) => {
     response.json({ ok: true });
@@ -583,6 +773,18 @@ export function createApp() {
     response.json({ tours: tours.map((tour) => serializeTour(tour)) });
   });
 
+  app.get("/api/tours/current", async (_request, response) => {
+    const tour =
+      (await TourModel.findOne({ isCurrent: true }).sort({ updatedAt: -1 })) ||
+      (await TourModel.findOne().sort({ createdAt: -1 }));
+
+    if (!tour) {
+      throw createHttpError(404, "Tour was not found.");
+    }
+
+    response.json({ tour: serializeTour(tour) });
+  });
+
   app.post("/api/tours", async (request, response) => {
     const user = await getAuthUser(request, true);
     ensurePermission(canManageTours(serializeUser(user)), "Only admins can manage tours.");
@@ -592,8 +794,14 @@ export function createApp() {
       name: payload.name.trim(),
       seasonLabel: payload.seasonLabel.trim(),
       description: payload.description.trim(),
+      rulesText: payload.rulesText.trim(),
+      isCurrent: payload.isCurrent,
       scoring: normalizeScoring(payload.scoring),
     });
+
+    if (payload.isCurrent) {
+      await setCurrentTour(tour._id);
+    }
 
     response.status(201).json({ tour: serializeTour(tour) });
   });
@@ -611,7 +819,14 @@ export function createApp() {
     tour.name = payload.name.trim();
     tour.seasonLabel = payload.seasonLabel.trim();
     tour.description = payload.description.trim();
+    tour.rulesText = payload.rulesText.trim();
+    tour.isCurrent = payload.isCurrent;
     tour.scoring = normalizeScoring(payload.scoring);
+
+    if (payload.isCurrent) {
+      await setCurrentTour(tour._id);
+    }
+
     await tour.save();
 
     response.json({ tour: serializeTour(tour) });
@@ -647,12 +862,13 @@ export function createApp() {
 
   app.get("/api/tours/:tourId/competitors", async (request, response) => {
     const tourId = toObjectId(request.params.tourId, "tourId");
-    const query = String(request.query.query ?? "").trim();
+    const query = String(request.query.query ?? "").trim().slice(0, 64);
+    const escapedQuery = escapeRegexPattern(normalizeCompetitorName(query));
     const filter = query
       ? {
           tourId,
           normalizedName: {
-            $regex: normalizeCompetitorName(query),
+            $regex: escapedQuery,
             $options: "i",
           },
         }
@@ -665,7 +881,6 @@ export function createApp() {
         tourId: competitor.tourId.toString(),
         displayName: competitor.displayName,
         aliases: [...competitor.aliases],
-        linkedUserId: competitor.linkedUserId?.toString() ?? null,
       })),
     });
   });
@@ -851,6 +1066,68 @@ export function createApp() {
     response.json({ competition: serializeCompetition(competition) });
   });
 
+  app.post("/api/competitions/:competitionId/signup", async (request, response) => {
+    const user = await getAuthUser(request, true);
+    const competition = await CompetitionModel.findById(toObjectId(request.params.competitionId, "competitionId"));
+
+    if (!competition) {
+      throw createHttpError(404, "Competition was not found.");
+    }
+
+    ensureCompetitionAllowsSelfSignup(competition);
+
+    const competitor = await resolveSelfSignupCompetitor(competition.tourId, user);
+    const isAlreadySignedUp = competition.participants.some(
+      (participant) => participant.competitorId.toString() === competitor.competitorId.toString(),
+    );
+
+    if (isAlreadySignedUp) {
+      throw createHttpError(409, "You are already signed up for this competition.");
+    }
+
+    competition.participants.push({
+      competitorId: competitor.competitorId,
+      displayName: competitor.displayName,
+    });
+    competition.auditLog.push({
+      actorUserId: user._id,
+      action: "self-signed-up",
+      at: new Date(),
+      note: `${user.name} joined this competition.`,
+    });
+    await competition.save();
+
+    response.json({ competition: serializeCompetition(competition) });
+  });
+
+  app.delete("/api/competitions/:competitionId/signup", async (request, response) => {
+    const user = await getAuthUser(request, true);
+    const competition = await CompetitionModel.findById(toObjectId(request.params.competitionId, "competitionId"));
+
+    if (!competition) {
+      throw createHttpError(404, "Competition was not found.");
+    }
+
+    ensureCompetitionAllowsSelfSignup(competition);
+
+    const competitor = await resolveSelfSignupCompetitor(competition.tourId, user);
+    const { participantRemoved } = removeParticipantAndResultsByCompetitorId(competition, competitor.competitorId);
+
+    if (!participantRemoved) {
+      throw createHttpError(404, "You are not signed up for this competition.");
+    }
+
+    competition.auditLog.push({
+      actorUserId: user._id,
+      action: "self-withdrew",
+      at: new Date(),
+      note: `${user.name} left this competition.`,
+    });
+    await competition.save();
+
+    response.json({ competition: serializeCompetition(competition) });
+  });
+
   app.get("/api/users", async (request, response) => {
     const user = await getAuthUser(request, true);
     ensurePermission(canManageUsers(serializeUser(user)), "Only admins can manage users.");
@@ -894,9 +1171,10 @@ export function createApp() {
     }
 
     if (error instanceof Error) {
+      console.error(error);
       response.status(500).json({
         error: "Unexpected server error.",
-        details: error.message,
+        ...(process.env.NODE_ENV !== "production" ? { details: error.message } : {}),
       });
       return;
     }

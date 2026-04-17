@@ -6,7 +6,7 @@ export type Role = z.infer<typeof roleSchema>;
 export const competitionStatusSchema = z.enum(["draft", "published", "finalized"]);
 export type CompetitionStatus = z.infer<typeof competitionStatusSchema>;
 
-export const resultOrderSchema = z.enum(["lower-is-better", "higher-is-better"]);
+export const resultOrderSchema = z.literal("lower-is-better");
 export type ResultOrder = z.infer<typeof resultOrderSchema>;
 
 export const objectIdSchema = z.string().trim().min(1).max(64);
@@ -35,7 +35,7 @@ export const competitionResultInputSchema = z.object({
   competitorId: objectIdSchema.optional(),
   displayName: z.string().trim().min(1).max(80),
   placement: z.number().int().min(1),
-  resultValue: z.number(),
+  resultValue: z.number().min(-50).max(200),
   tieBreakRank: z.number().int().min(1).nullable().optional(),
   tieBreakNote: z.string().trim().max(200).optional(),
   awardedPoints: z.number().min(0).optional(),
@@ -78,9 +78,32 @@ export const tourInputSchema = z.object({
   name: z.string().trim().min(3).max(120),
   seasonLabel: z.string().trim().min(1).max(40),
   description: z.string().trim().min(1).max(2000),
+  rulesText: z.string().trim().max(4000).default(""),
+  isCurrent: z.boolean().default(false),
   scoring: scoringConfigSchema,
 });
 export type TourInput = z.infer<typeof tourInputSchema>;
+
+const scoresheetUrlSchema = z
+  .string()
+  .trim()
+  .refine(
+    (value) => {
+      if (value === "") {
+        return true;
+      }
+
+      try {
+        const url = new URL(value);
+        return url.protocol === "https:";
+      } catch {
+        return false;
+      }
+    },
+    {
+      message: "Scoresheet URL must be empty or a valid HTTPS URL.",
+    },
+  );
 
 export const competitionInputSchema = z.object({
   tourId: objectIdSchema,
@@ -89,9 +112,9 @@ export const competitionInputSchema = z.object({
   location: z.string().trim().min(2).max(200),
   scheduledAt: z.string().datetime(),
   organizerName: z.string().trim().min(2).max(80),
-  scoresheetUrl: z.string().trim().url().optional().or(z.literal("")),
+  scoresheetUrl: scoresheetUrlSchema.optional(),
   status: competitionStatusSchema.default("draft"),
-  participants: z.array(participantInputSchema).min(1),
+  participants: z.array(participantInputSchema).min(0),
   results: z.array(competitionResultInputSchema).optional(),
 });
 export type CompetitionInput = z.infer<typeof competitionInputSchema>;
@@ -109,6 +132,8 @@ export type TourSummary = {
   name: string;
   seasonLabel: string;
   description: string;
+  rulesText: string;
+  isCurrent: boolean;
   scoring: ScoringConfig;
 };
 

@@ -1,0 +1,35 @@
+{
+  "displayName": "frolf-api-high-p95-latency",
+  "documentation": {
+    "content": "Cloud Run API latency is elevated (p95 proxy approximation).",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "Request latency p95 above 1.5s",
+      "conditionThreshold": {
+        "filter": "resource.type = \"cloud_run_revision\" AND metric.type = \"run.googleapis.com/request_latencies\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_PERCENTILE_95"
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 1.5,
+        "duration": "300s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+  "enabled": true,
+  "notificationChannels": [
+    "projects/PROJECT_ID/notificationChannels/CHANNEL_ID"
+  ]
+}
