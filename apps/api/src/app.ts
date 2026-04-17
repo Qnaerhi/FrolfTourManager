@@ -194,6 +194,22 @@ function serializeAnnouncement(announcement: AnnouncementDoc) {
   };
 }
 
+function displayNameFromFirebaseUser(firebaseUser: {
+  displayName?: string | null;
+  email?: string | null;
+}): string {
+  const fromProfile = (firebaseUser.displayName ?? "").trim();
+  if (fromProfile) {
+    return fromProfile;
+  }
+  const email = (firebaseUser.email ?? "").trim();
+  const at = email.indexOf("@");
+  if (at > 0) {
+    return email.slice(0, at).trim() || "User";
+  }
+  return email || "User";
+}
+
 async function syncUserFromFirebaseUid(uid: string): Promise<UserDoc> {
   const auth = getFirebaseAuth();
   const firebaseUser = await auth.getUser(uid);
@@ -209,7 +225,7 @@ async function syncUserFromFirebaseUid(uid: string): Promise<UserDoc> {
 
   if (!user) {
     user = await UserModel.create({
-      name: (firebaseUser.displayName ?? firebaseUser.email ?? "User").trim(),
+      name: displayNameFromFirebaseUser(firebaseUser),
       email: firebaseUser.email ?? normalizedEmail,
       normalizedEmail,
       passwordHash: "",
@@ -233,6 +249,16 @@ async function syncUserFromFirebaseUid(uid: string): Promise<UserDoc> {
     if (displayName && user.name !== displayName) {
       user.name = displayName;
       changed = true;
+    } else if (
+      !displayName &&
+      user.email &&
+      user.name.trim().toLowerCase() === user.email.trim().toLowerCase()
+    ) {
+      const nextName = displayNameFromFirebaseUser(firebaseUser);
+      if (user.name !== nextName) {
+        user.name = nextName;
+        changed = true;
+      }
     }
     if (user.emailVerified !== Boolean(firebaseUser.emailVerified)) {
       user.emailVerified = Boolean(firebaseUser.emailVerified);
