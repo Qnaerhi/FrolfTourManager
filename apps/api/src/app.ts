@@ -311,7 +311,6 @@ async function consumeRateLimit(
     { key: bucketKey },
     {
       $setOnInsert: {
-        count: 0,
         expiresAt: new Date(resetAt + windowMs),
       },
       $inc: { count: 1 },
